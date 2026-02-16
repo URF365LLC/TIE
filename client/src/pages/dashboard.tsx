@@ -3,7 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Activity, Zap, BarChart3, Clock, Play, TrendingUp, TrendingDown, AlertCircle } from "lucide-react";
+import { Activity, Zap, BarChart3, Clock, Play, Pause, TrendingUp, TrendingDown, AlertCircle } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Link } from "wouter";
@@ -49,6 +49,26 @@ export default function Dashboard() {
     },
   });
 
+  const toggleScanner = useMutation({
+    mutationFn: async () => {
+      const newState = !stats?.scanEnabled;
+      const res = await apiRequest("POST", "/api/settings", { scanEnabled: newState });
+      return res.json();
+    },
+    onSuccess: () => {
+      const wasEnabled = stats?.scanEnabled;
+      toast({
+        title: wasEnabled ? "Scanner paused" : "Scanner enabled",
+        description: wasEnabled ? "Background scanning has been paused." : "Background scanning is now active.",
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Toggle failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   return (
     <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto">
       <div className="flex items-center justify-between flex-wrap gap-4">
@@ -56,14 +76,35 @@ export default function Dashboard() {
           <h1 className="text-2xl font-semibold tracking-tight" data-testid="text-dashboard-title">Dashboard</h1>
           <p className="text-sm text-muted-foreground mt-1">Trading Intelligence Engine overview</p>
         </div>
-        <Button
-          onClick={() => triggerScan.mutate()}
-          disabled={triggerScan.isPending}
-          data-testid="button-manual-scan"
-        >
-          <Play className="w-4 h-4 mr-2" />
-          {triggerScan.isPending ? "Scanning..." : "Run Scan"}
-        </Button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            variant={stats?.scanEnabled ? "destructive" : "default"}
+            onClick={() => toggleScanner.mutate()}
+            disabled={toggleScanner.isPending || statsLoading}
+            data-testid="button-toggle-scanner"
+          >
+            {stats?.scanEnabled ? (
+              <>
+                <Pause className="w-4 h-4 mr-2" />
+                {toggleScanner.isPending ? "Pausing..." : "Pause Scanner"}
+              </>
+            ) : (
+              <>
+                <Play className="w-4 h-4 mr-2" />
+                {toggleScanner.isPending ? "Enabling..." : "Enable Scanner"}
+              </>
+            )}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => triggerScan.mutate()}
+            disabled={triggerScan.isPending}
+            data-testid="button-manual-scan"
+          >
+            <Play className="w-4 h-4 mr-2" />
+            {triggerScan.isPending ? "Scanning..." : "Run Scan"}
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
