@@ -1,0 +1,37 @@
+# Re-Audit After Fix Pack
+
+## Executive Verdict
+
+FAIL
+
+## Checklist
+
+| Control | Status | Evidence |
+|---|---|---|
+| Twelve Data only source | PASS | Data client base URL is Twelve Data, scanner imports only Twelve Data fetchers, and candle source default is `twelvedata`. |
+| KuCoin pinned for crypto | PASS | Crypto canonical mapping forces `:KuCoin` suffix. |
+| Closed-candle enforcement | PASS | Scanner explicitly chooses latest closed candle by timeframe and evaluates only candles at or before that close. |
+| Range breakout follow-through | PASS | Strategy requires 2 consecutive closes beyond range boundary + Bollinger boundary. |
+| Rate limiting <=520/min, header-based, 429 minute-boundary retry | PASS | Target budget constant is 520; header values are parsed and preferred; 429 waits to next minute boundary with jitter and retries up to max attempts. |
+| UTC-safe timestamps (timestamptz) + explicit parsing | FAIL | Runtime parsing is explicit UTC in scanner, but DB schema uses `timestamp(...)` not timezone-aware `timestamptz`. |
+| Deterministic scheduler alignment | FAIL | 60s interval checks `minutes % 15 === 0 || 1`, which is resilient but still timer-driven and can drift/skew around process wake delays. |
+| Idempotent ingestion & signal dedupe stability | PASS | Candle/indicator upserts use unique conflict targets; signal upsert dedupes on instrument+tf+strategy+direction+candle; scan progress gate prevents re-processing closed bars. |
+| No secrets in logs | PASS | Request logging only logs method/path/status/duration/reqId and errors are reduced to name/message/stack; SMTP creds are not logged. |
+| Email anti-spam/cooldowns | FAIL | Email send gate checks only `settings.emailEnabled`, `signal.status === "NEW"`, and score threshold; no cooldown window/rate limiter per symbol/strategy. |
+
+## Commands and Results
+
+- `npm test` passed (6/6 tests).
+- `npm run check` passed (TypeScript compile).
+
+## Remaining Risks
+
+### P0
+1. **Timezone storage ambiguity**: core datetime columns are `timestamp` without timezone, which can create subtle UTC drift depending on DB/session settings.
+2. **Scheduler non-determinism at boundary**: timer-loop alignment can miss intended exact boundary execution under event-loop lag.
+
+### P1
+1. **No explicit alert cooldown/rate limiting**: bursty markets can still generate high-frequency valid alerts across consecutive bars without operator-defined quiet/cooldown policy.
+
+### P2
+1. **Batch endpoint fallback transparency**: when batch is unavailable, fallback works sequentially but does not currently log detailed fallback cause/context for ops visibility.
