@@ -14,14 +14,16 @@ import {
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
+const tz = { withTimezone: true } as const;
+
 export const instruments = pgTable("instruments", {
   id: serial("id").primaryKey(),
   canonicalSymbol: varchar("canonical_symbol", { length: 20 }).notNull().unique(),
   assetClass: varchar("asset_class", { length: 10 }).notNull(),
   vendorSymbol: varchar("vendor_symbol", { length: 40 }).notNull(),
   enabled: boolean("enabled").notNull().default(true),
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at", tz).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", tz).notNull().defaultNow(),
 });
 
 export const candles = pgTable(
@@ -30,7 +32,7 @@ export const candles = pgTable(
     id: serial("id").primaryKey(),
     instrumentId: integer("instrument_id").notNull().references(() => instruments.id),
     timeframe: varchar("timeframe", { length: 5 }).notNull(),
-    datetimeUtc: timestamp("datetime_utc").notNull(),
+    datetimeUtc: timestamp("datetime_utc", tz).notNull(),
     open: real("open").notNull(),
     high: real("high").notNull(),
     low: real("low").notNull(),
@@ -49,7 +51,7 @@ export const indicators = pgTable(
     id: serial("id").primaryKey(),
     instrumentId: integer("instrument_id").notNull().references(() => instruments.id),
     timeframe: varchar("timeframe", { length: 5 }).notNull(),
-    datetimeUtc: timestamp("datetime_utc").notNull(),
+    datetimeUtc: timestamp("datetime_utc", tz).notNull(),
     ema9: real("ema9"),
     ema21: real("ema21"),
     ema55: real("ema55"),
@@ -71,8 +73,8 @@ export const indicators = pgTable(
 
 export const scanRuns = pgTable("scan_runs", {
   id: serial("id").primaryKey(),
-  startedAt: timestamp("started_at").notNull().defaultNow(),
-  finishedAt: timestamp("finished_at"),
+  startedAt: timestamp("started_at", tz).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", tz),
   timeframe: varchar("timeframe", { length: 5 }).notNull(),
   status: varchar("status", { length: 40 }).notNull().default("running"),
   creditsUsedEst: integer("credits_used_est"),
@@ -85,8 +87,8 @@ export const scanProgress = pgTable(
     id: serial("id").primaryKey(),
     instrumentId: integer("instrument_id").notNull().references(() => instruments.id),
     timeframe: varchar("timeframe", { length: 5 }).notNull(),
-    lastProcessedBarUtc: timestamp("last_processed_bar_utc").notNull(),
-    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+    lastProcessedBarUtc: timestamp("last_processed_bar_utc", tz).notNull(),
+    updatedAt: timestamp("updated_at", tz).notNull().defaultNow(),
   },
   (table) => [uniqueIndex("scan_progress_unique_idx").on(table.instrumentId, table.timeframe)]
 );
@@ -99,8 +101,8 @@ export const signals = pgTable(
     timeframe: varchar("timeframe", { length: 5 }).notNull(),
     strategy: varchar("strategy", { length: 30 }).notNull(),
     direction: varchar("direction", { length: 5 }).notNull(),
-    detectedAt: timestamp("detected_at").notNull().defaultNow(),
-    candleDatetimeUtc: timestamp("candle_datetime_utc").notNull(),
+    detectedAt: timestamp("detected_at", tz).notNull().defaultNow(),
+    candleDatetimeUtc: timestamp("candle_datetime_utc", tz).notNull(),
     score: integer("score").notNull(),
     reasonJson: jsonb("reason_json"),
     status: varchar("status", { length: 10 }).notNull().default("NEW"),
@@ -119,7 +121,7 @@ export const signals = pgTable(
 export const alertEvents = pgTable("alert_events", {
   id: serial("id").primaryKey(),
   signalId: integer("signal_id").notNull().references(() => signals.id),
-  sentAt: timestamp("sent_at").notNull().defaultNow(),
+  sentAt: timestamp("sent_at", tz).notNull().defaultNow(),
   channel: varchar("channel", { length: 10 }).notNull().default("EMAIL"),
   to: varchar("to", { length: 255 }).notNull(),
   subject: varchar("subject", { length: 500 }).notNull(),
@@ -137,6 +139,7 @@ export const settings = pgTable("settings", {
   quietHoursJson: jsonb("quiet_hours_json"),
   maxSymbolsPerBurst: integer("max_symbols_per_burst").notNull().default(4),
   burstSleepMs: integer("burst_sleep_ms").notNull().default(1000),
+  alertCooldownMinutes: integer("alert_cooldown_minutes").notNull().default(60),
 });
 
 export const insertInstrumentSchema = createInsertSchema(instruments).omit({ id: true, createdAt: true, updatedAt: true });

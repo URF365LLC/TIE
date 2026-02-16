@@ -7,7 +7,7 @@ import { sendSignalAlert } from "./alerter";
 import { log } from "./logger";
 import type { Instrument, InsertCandle, InsertIndicator, Candle, Indicator } from "@shared/schema";
 
-let scannerInterval: NodeJS.Timeout | null = null;
+let scannerTimeout: NodeJS.Timeout | null = null;
 let isScanning = false;
 
 function parseUtc(datetime: string): Date {
@@ -29,8 +29,15 @@ function indicatorsCompleteForCandle(candle: Candle, indicators: Indicator[]): b
   return hasRequiredIndicators(ind);
 }
 
+export function msUntilNext15mBoundary(nowMs = Date.now()): number {
+  const intervalMs = 15 * 60 * 1000;
+  const remainder = nowMs % intervalMs;
+  if (remainder === 0) return intervalMs;
+  return intervalMs - remainder;
+}
+
 export async function startScanner(): Promise<void> {
-  if (scannerInterval) return;
+  if (scannerTimeout) return;
 
   const lock = await db.execute(sql`select pg_try_advisory_lock(424242) as acquired`);
   const acquired = (lock.rows[0] as any)?.acquired === true;
@@ -39,31 +46,38 @@ export async function startScanner(): Promise<void> {
     return;
   }
 
-  log("Scanner started - checking every 60s for alignment", "scanner");
+  log("Scanner started - anchored to 15-minute wall-clock boundaries", "scanner");
+  scheduleNextTick();
+}
 
-  scannerInterval = setInterval(async () => {
+function scheduleNextTick(): void {
+  const delayMs = msUntilNext15mBoundary() + 2000;
+  log(`Next scan tick in ${Math.round(delayMs / 1000)}s`, "scanner");
+  scannerTimeout = setTimeout(async () => {
     try {
-      const settings = await storage.getSettings();
-      if (!settings.scanEnabled) return;
-
-      const now = new Date();
-      const minutes = now.getUTCMinutes();
-
-      if (minutes % 15 === 0 || minutes % 15 === 1) {
-        if (!isScanning) {
-          await runScanCycle("15m", settings.maxSymbolsPerBurst, settings.burstSleepMs);
-        }
-      }
+      await tick();
     } catch (err: any) {
       log(`Scanner tick error: ${err.message}`, "scanner");
     }
-  }, 60000);
+    if (scannerTimeout !== null) {
+      scheduleNextTick();
+    }
+  }, delayMs);
+}
+
+async function tick(): Promise<void> {
+  const settings = await storage.getSettings();
+  if (!settings.scanEnabled) return;
+
+  if (!isScanning) {
+    await runScanCycle("15m", settings.maxSymbolsPerBurst, settings.burstSleepMs);
+  }
 }
 
 export function stopScanner(): void {
-  if (scannerInterval) {
-    clearInterval(scannerInterval);
-    scannerInterval = null;
+  if (scannerTimeout) {
+    clearTimeout(scannerTimeout);
+    scannerTimeout = null;
     log("Scanner stopped", "scanner");
   }
 }

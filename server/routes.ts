@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { runScanCycle } from "./scanner";
 import { WHITELIST, canonicalToVendor } from "@shared/schema";
+import { log } from "./logger";
 import { z } from "zod";
 
 const settingsUpdateSchema = z.object({
@@ -13,6 +14,7 @@ const settingsUpdateSchema = z.object({
   minScoreToAlert: z.number().int().min(0).max(100).optional(),
   maxSymbolsPerBurst: z.number().int().min(1).max(10).optional(),
   burstSleepMs: z.number().int().min(500).max(5000).optional(),
+  alertCooldownMinutes: z.number().int().min(1).max(1440).optional(),
 });
 
 export async function registerRoutes(
@@ -86,7 +88,7 @@ export async function registerRoutes(
 
   app.post("/api/scan/run", async (_req, res) => {
     try {
-      runScanCycle("15m").catch((err) => console.error("Manual scan error:", err));
+      runScanCycle("15m").catch((err) => log(`Manual scan error: ${err.message}`, "scanner"));
       res.json({ message: "Scan triggered" });
     } catch (err: any) {
       res.status(500).json({ message: err.message });

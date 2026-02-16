@@ -5,11 +5,19 @@ import type { Signal, Instrument, Settings } from "@shared/schema";
 
 let transporter: nodemailer.Transporter | null = null;
 
+const lastAlertByInstrument = new Map<number, number>();
+
 export function safeString(value: unknown, max = 300): string {
   return String(value ?? "")
     .replace(/[\r\n]+/g, " ")
     .trim()
     .slice(0, max);
+}
+
+export function isWithinCooldown(instrumentId: number, cooldownMinutes: number, nowMs = Date.now()): boolean {
+  const last = lastAlertByInstrument.get(instrumentId);
+  if (last == null) return false;
+  return (nowMs - last) < cooldownMinutes * 60 * 1000;
 }
 
 export function formatAlertEmail(
@@ -75,6 +83,12 @@ export async function sendSignalAlert(
   reasonJson: Record<string, any>,
   settings: Settings
 ): Promise<void> {
+  const cooldownMinutes = settings.alertCooldownMinutes ?? 60;
+  if (isWithinCooldown(instrument.id, cooldownMinutes)) {
+    log(`Alert cooldown active for ${instrument.canonicalSymbol} (${cooldownMinutes}min window), skipping`, "alerter");
+    return;
+  }
+
   const mailer = getTransporter();
   const toEmail = settings.alertToEmail || process.env.ALERT_TO_EMAIL;
   const fromEmail = settings.smtpFrom || process.env.SMTP_FROM_EMAIL;
@@ -93,6 +107,8 @@ export async function sendSignalAlert(
       subject,
       text: body,
     });
+
+    lastAlertByInstrument.set(instrument.id, Date.now());
 
     await storage.createAlertEvent({
       signalId: signal.id,

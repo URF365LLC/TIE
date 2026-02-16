@@ -27,6 +27,7 @@ export default function SettingsPage() {
     minScoreToAlert: 60,
     maxSymbolsPerBurst: 4,
     burstSleepMs: 1000,
+    alertCooldownMinutes: 60,
   });
 
   useEffect(() => {
@@ -39,6 +40,7 @@ export default function SettingsPage() {
         minScoreToAlert: settings.minScoreToAlert,
         maxSymbolsPerBurst: settings.maxSymbolsPerBurst,
         burstSleepMs: settings.burstSleepMs,
+        alertCooldownMinutes: settings.alertCooldownMinutes,
       });
     }
   }, [settings]);
@@ -187,6 +189,18 @@ export default function SettingsPage() {
                 data-testid="input-smtp-from"
               />
             </div>
+          </div>
+          <div className="space-y-2">
+            <Label className="text-sm">Alert Cooldown (minutes)</Label>
+            <Input
+              type="number"
+              min={1}
+              max={1440}
+              value={form.alertCooldownMinutes}
+              onChange={(e) => setForm({ ...form, alertCooldownMinutes: parseInt(e.target.value) || 60 })}
+              data-testid="input-alert-cooldown"
+            />
+            <p className="text-[11px] text-muted-foreground">Minimum minutes between alerts for the same symbol</p>
           </div>
           <p className="text-[11px] text-muted-foreground">
             SMTP credentials (host, port, user, pass) are configured via environment variables.
