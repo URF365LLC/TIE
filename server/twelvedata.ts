@@ -1,6 +1,9 @@
-import { log } from "./index";
+import { log } from "./logger";
 
 const BASE_URL = "https://api.twelvedata.com";
+const PLAN_LIMIT_PER_MIN = 610;
+const TARGET_CREDITS_PER_MIN = 520;
+const MAX_RETRIES = 3;
 
 interface RateLimitState {
   creditsUsed: number;
@@ -8,17 +11,20 @@ interface RateLimitState {
   lastReset: number;
   paused: boolean;
   pauseUntil: number;
+  retryCount: number;
 }
 
 const rateLimit: RateLimitState = {
   creditsUsed: 0,
-  creditsLeft: 610,
+  creditsLeft: PLAN_LIMIT_PER_MIN,
   lastReset: Date.now(),
   paused: false,
   pauseUntil: 0,
+  retryCount: 0,
 };
 
-const MAX_CREDITS_PER_MIN = 520;
+let requestQueue: Promise<void> = Promise.resolve();
+let sleepFn: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function getApiKey(): string {
   const key = process.env.TWELVEDATA_API_KEY;
@@ -26,191 +32,178 @@ function getApiKey(): string {
   return key;
 }
 
-async function waitForRateLimit(): Promise<void> {
-  if (rateLimit.paused && Date.now() < rateLimit.pauseUntil) {
-    const waitMs = rateLimit.pauseUntil - Date.now();
-    log(`Rate limit: pausing ${waitMs}ms`, "twelvedata");
-    await sleep(waitMs);
-    rateLimit.paused = false;
-    rateLimit.creditsUsed = 0;
-  }
+function parseHeaderInt(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
+function resetWindowIfNeeded(): void {
   if (Date.now() - rateLimit.lastReset > 60000) {
-    rateLimit.creditsUsed = 0;
     rateLimit.lastReset = Date.now();
+    rateLimit.creditsUsed = 0;
+    rateLimit.creditsLeft = PLAN_LIMIT_PER_MIN;
+    rateLimit.paused = false;
+    rateLimit.pauseUntil = 0;
+    rateLimit.retryCount = 0;
+  }
+}
+
+export function msUntilNextMinuteBoundary(nowMs = Date.now()): number {
+  const nextMinute = Math.ceil(nowMs / 60000) * 60000;
+  return Math.max(nextMinute - nowMs, 0);
+}
+
+function jitterMs(): number {
+  return Math.floor(Math.random() * 500);
+}
+
+async function waitForBudget(): Promise<void> {
+  resetWindowIfNeeded();
+
+  const now = Date.now();
+  if (rateLimit.paused && now < rateLimit.pauseUntil) {
+    await sleepFn(rateLimit.pauseUntil - now);
+    resetWindowIfNeeded();
   }
 
-  if (rateLimit.creditsUsed >= MAX_CREDITS_PER_MIN) {
-    const waitMs = 60000 - (Date.now() - rateLimit.lastReset) + 1000;
-    log(`Credits exhausted, waiting ${waitMs}ms`, "twelvedata");
-    await sleep(Math.max(waitMs, 1000));
-    rateLimit.creditsUsed = 0;
-    rateLimit.lastReset = Date.now();
+  if (rateLimit.creditsUsed >= TARGET_CREDITS_PER_MIN || rateLimit.creditsLeft <= PLAN_LIMIT_PER_MIN - TARGET_CREDITS_PER_MIN) {
+    const waitMs = msUntilNextMinuteBoundary() + 25;
+    log(`Credit budget reached, deferring ${waitMs}ms`, "twelvedata");
+    await sleepFn(waitMs);
+    resetWindowIfNeeded();
   }
 }
 
 function updateRateLimit(headers: Headers): void {
-  const used = headers.get("api-credits-used");
-  const left = headers.get("api-credits-left");
-  if (used) rateLimit.creditsUsed = parseInt(used);
-  if (left) rateLimit.creditsLeft = parseInt(left);
+  const used = parseHeaderInt(headers.get("api-credits-used"));
+  const left = parseHeaderInt(headers.get("api-credits-left"));
+  if (used !== null) rateLimit.creditsUsed = used;
+  if (left !== null) rateLimit.creditsLeft = left;
 }
 
-export async function fetchTimeSeries(
-  vendorSymbol: string,
-  interval: string,
-  outputsize = 300
-): Promise<any[]> {
-  await waitForRateLimit();
-  const url = `${BASE_URL}/time_series?symbol=${encodeURIComponent(vendorSymbol)}&interval=${interval}&outputsize=${outputsize}&apikey=${getApiKey()}`;
+async function enqueueRequest<T>(work: () => Promise<T>): Promise<T> {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const prior = requestQueue;
+  requestQueue = prior.then(() => gate).catch(() => gate);
+  await prior;
 
-  const res = await fetch(url);
-  updateRateLimit(res.headers);
-
-  if (res.status === 429) {
-    handleRateLimitError();
-    return [];
+  try {
+    return await work();
+  } finally {
+    release();
   }
-
-  const data = await res.json();
-  if (data.status === "error") {
-    log(`time_series error for ${vendorSymbol}: ${data.message}`, "twelvedata");
-    return [];
-  }
-
-  rateLimit.creditsUsed += 1;
-  return data.values || [];
 }
 
-export async function fetchEMA(
-  vendorSymbol: string,
-  interval: string,
-  timePeriod: number,
-  outputsize = 300
-): Promise<any[]> {
-  await waitForRateLimit();
-  const url = `${BASE_URL}/ema?symbol=${encodeURIComponent(vendorSymbol)}&interval=${interval}&time_period=${timePeriod}&outputsize=${outputsize}&apikey=${getApiKey()}`;
+async function requestWithRetry(endpoint: string, params: Record<string, string | number>): Promise<any[]> {
+  return enqueueRequest(async () => {
+    let lastErr: Error | null = null;
 
-  const res = await fetch(url);
-  updateRateLimit(res.headers);
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      await waitForBudget();
 
-  if (res.status === 429) {
-    handleRateLimitError();
-    return [];
-  }
+      const qs = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) qs.set(key, String(value));
+      qs.set("apikey", getApiKey());
+      const url = `${BASE_URL}/${endpoint}?${qs.toString()}`;
 
-  const data = await res.json();
-  if (data.status === "error") {
-    log(`EMA error for ${vendorSymbol} (${timePeriod}): ${data.message}`, "twelvedata");
-    return [];
-  }
+      const res = await fetch(url);
+      updateRateLimit(res.headers);
 
-  rateLimit.creditsUsed += 1;
-  return data.values || [];
+      if (res.status === 429) {
+        rateLimit.retryCount += 1;
+        const waitMs = msUntilNextMinuteBoundary() + jitterMs();
+        rateLimit.paused = true;
+        rateLimit.pauseUntil = Date.now() + waitMs;
+        log(`429 ${endpoint}, retry ${attempt + 1}/${MAX_RETRIES}, waiting ${waitMs}ms`, "twelvedata");
+        await sleepFn(waitMs);
+        continue;
+      }
+
+      if (!res.ok) {
+        const message = `HTTP ${res.status} for ${endpoint}`;
+        lastErr = new Error(message);
+        break;
+      }
+
+      const data = await res.json();
+      if (data.status === "error") {
+        lastErr = new Error(`${endpoint} error: ${data.message}`);
+        break;
+      }
+
+      if (parseHeaderInt(res.headers.get("api-credits-used")) === null) {
+        rateLimit.creditsUsed += 1;
+      }
+      if (parseHeaderInt(res.headers.get("api-credits-left")) === null) {
+        rateLimit.creditsLeft = Math.max(rateLimit.creditsLeft - 1, 0);
+      }
+
+      return data.values || [];
+    }
+
+    throw lastErr ?? new Error(`TwelveData request failed after retries for ${endpoint}`);
+  });
 }
 
-export async function fetchBBands(
-  vendorSymbol: string,
-  interval: string,
-  outputsize = 300
-): Promise<any[]> {
-  await waitForRateLimit();
-  const url = `${BASE_URL}/bbands?symbol=${encodeURIComponent(vendorSymbol)}&interval=${interval}&time_period=20&sd=2&outputsize=${outputsize}&apikey=${getApiKey()}`;
-
-  const res = await fetch(url);
-  updateRateLimit(res.headers);
-
-  if (res.status === 429) {
-    handleRateLimitError();
-    return [];
-  }
-
-  const data = await res.json();
-  if (data.status === "error") {
-    log(`BBANDS error for ${vendorSymbol}: ${data.message}`, "twelvedata");
-    return [];
-  }
-
-  rateLimit.creditsUsed += 1;
-  return data.values || [];
+export async function fetchTimeSeries(vendorSymbol: string, interval: string, outputsize = 300): Promise<any[]> {
+  return requestWithRetry("time_series", { symbol: vendorSymbol, interval, outputsize, timezone: "UTC" });
 }
 
-export async function fetchMACD(
-  vendorSymbol: string,
-  interval: string,
-  outputsize = 300
-): Promise<any[]> {
-  await waitForRateLimit();
-  const url = `${BASE_URL}/macd?symbol=${encodeURIComponent(vendorSymbol)}&interval=${interval}&outputsize=${outputsize}&apikey=${getApiKey()}`;
-
-  const res = await fetch(url);
-  updateRateLimit(res.headers);
-
-  if (res.status === 429) {
-    handleRateLimitError();
-    return [];
-  }
-
-  const data = await res.json();
-  if (data.status === "error") {
-    log(`MACD error for ${vendorSymbol}: ${data.message}`, "twelvedata");
-    return [];
-  }
-
-  rateLimit.creditsUsed += 1;
-  return data.values || [];
+export async function fetchEMA(vendorSymbol: string, interval: string, timePeriod: number, outputsize = 300): Promise<any[]> {
+  return requestWithRetry("ema", { symbol: vendorSymbol, interval, time_period: timePeriod, outputsize, timezone: "UTC" });
 }
 
-export async function fetchATR(
-  vendorSymbol: string,
-  interval: string,
-  outputsize = 300
-): Promise<any[]> {
-  await waitForRateLimit();
-  const url = `${BASE_URL}/atr?symbol=${encodeURIComponent(vendorSymbol)}&interval=${interval}&time_period=14&outputsize=${outputsize}&apikey=${getApiKey()}`;
-
-  const res = await fetch(url);
-  updateRateLimit(res.headers);
-
-  if (res.status === 429) {
-    handleRateLimitError();
-    return [];
-  }
-
-  const data = await res.json();
-  if (data.status === "error") {
-    log(`ATR error for ${vendorSymbol}: ${data.message}`, "twelvedata");
-    return [];
-  }
-
-  rateLimit.creditsUsed += 1;
-  return data.values || [];
+export async function fetchBBands(vendorSymbol: string, interval: string, outputsize = 300): Promise<any[]> {
+  return requestWithRetry("bbands", { symbol: vendorSymbol, interval, time_period: 20, sd: 2, outputsize, timezone: "UTC" });
 }
 
-export async function fetchADX(
-  vendorSymbol: string,
-  interval: string,
-  outputsize = 300
-): Promise<any[]> {
-  await waitForRateLimit();
-  const url = `${BASE_URL}/adx?symbol=${encodeURIComponent(vendorSymbol)}&interval=${interval}&time_period=14&outputsize=${outputsize}&apikey=${getApiKey()}`;
+export async function fetchMACD(vendorSymbol: string, interval: string, outputsize = 300): Promise<any[]> {
+  return requestWithRetry("macd", { symbol: vendorSymbol, interval, outputsize, timezone: "UTC" });
+}
 
-  const res = await fetch(url);
-  updateRateLimit(res.headers);
+export async function fetchATR(vendorSymbol: string, interval: string, outputsize = 300): Promise<any[]> {
+  return requestWithRetry("atr", { symbol: vendorSymbol, interval, time_period: 14, outputsize, timezone: "UTC" });
+}
 
-  if (res.status === 429) {
-    handleRateLimitError();
-    return [];
+export async function fetchADX(vendorSymbol: string, interval: string, outputsize = 300): Promise<any[]> {
+  return requestWithRetry("adx", { symbol: vendorSymbol, interval, time_period: 14, outputsize, timezone: "UTC" });
+}
+
+
+
+async function fetchIndicatorPackBatch(vendorSymbol: string, interval: string, outputsize: number): Promise<any | null> {
+  try {
+    const body = {
+      data: [
+        { endpoint: "time_series", params: { symbol: vendorSymbol, interval, outputsize, timezone: "UTC" } },
+        { endpoint: "ema", params: { symbol: vendorSymbol, interval, time_period: 9, outputsize, timezone: "UTC" } },
+        { endpoint: "ema", params: { symbol: vendorSymbol, interval, time_period: 21, outputsize, timezone: "UTC" } },
+        { endpoint: "ema", params: { symbol: vendorSymbol, interval, time_period: 55, outputsize, timezone: "UTC" } },
+        { endpoint: "ema", params: { symbol: vendorSymbol, interval, time_period: 200, outputsize, timezone: "UTC" } },
+        { endpoint: "bbands", params: { symbol: vendorSymbol, interval, time_period: 20, sd: 2, outputsize, timezone: "UTC" } },
+        { endpoint: "macd", params: { symbol: vendorSymbol, interval, outputsize, timezone: "UTC" } },
+        { endpoint: "atr", params: { symbol: vendorSymbol, interval, time_period: 14, outputsize, timezone: "UTC" } },
+        { endpoint: "adx", params: { symbol: vendorSymbol, interval, time_period: 14, outputsize, timezone: "UTC" } },
+      ],
+    };
+
+    const res = await fetch(`${BASE_URL}/batch?apikey=${getApiKey()}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) return null;
+    updateRateLimit(res.headers);
+    const data = await res.json();
+    return data;
+  } catch {
+    return null;
   }
-
-  const data = await res.json();
-  if (data.status === "error") {
-    log(`ADX error for ${vendorSymbol}: ${data.message}`, "twelvedata");
-    return [];
-  }
-
-  rateLimit.creditsUsed += 1;
-  return data.values || [];
 }
 
 export async function fetchAllIndicatorsForSymbol(
@@ -228,33 +221,51 @@ export async function fetchAllIndicatorsForSymbol(
   atr: any[];
   adx: any[];
 }> {
-  const [candleData, ema9, ema21, ema55, ema200, bbands, macd, atr, adx] = await Promise.all([
-    fetchTimeSeries(vendorSymbol, interval, outputsize),
-    fetchEMA(vendorSymbol, interval, 9, outputsize),
-    fetchEMA(vendorSymbol, interval, 21, outputsize),
-    fetchEMA(vendorSymbol, interval, 55, outputsize),
-    fetchEMA(vendorSymbol, interval, 200, outputsize),
-    fetchBBands(vendorSymbol, interval, outputsize),
-    fetchMACD(vendorSymbol, interval, outputsize),
-    fetchATR(vendorSymbol, interval, outputsize),
-    fetchADX(vendorSymbol, interval, outputsize),
-  ]);
+  const batch = await fetchIndicatorPackBatch(vendorSymbol, interval, outputsize);
+  if (batch && Array.isArray(batch.data) && batch.data.length >= 9) {
+    const rows = batch.data;
+    return {
+      candles: rows[0]?.values || [],
+      ema9: rows[1]?.values || [],
+      ema21: rows[2]?.values || [],
+      ema55: rows[3]?.values || [],
+      ema200: rows[4]?.values || [],
+      bbands: rows[5]?.values || [],
+      macd: rows[6]?.values || [],
+      atr: rows[7]?.values || [],
+      adx: rows[8]?.values || [],
+    };
+  }
 
-  return { candles: candleData, ema9, ema21, ema55, ema200, bbands, macd, atr, adx };
-}
+  // Sequential fallback keeps credit accounting deterministic under a single global governor.
+  const candles = await fetchTimeSeries(vendorSymbol, interval, outputsize);
+  const ema9 = await fetchEMA(vendorSymbol, interval, 9, outputsize);
+  const ema21 = await fetchEMA(vendorSymbol, interval, 21, outputsize);
+  const ema55 = await fetchEMA(vendorSymbol, interval, 55, outputsize);
+  const ema200 = await fetchEMA(vendorSymbol, interval, 200, outputsize);
+  const bbands = await fetchBBands(vendorSymbol, interval, outputsize);
+  const macd = await fetchMACD(vendorSymbol, interval, outputsize);
+  const atr = await fetchATR(vendorSymbol, interval, outputsize);
+  const adx = await fetchADX(vendorSymbol, interval, outputsize);
 
-function handleRateLimitError(): void {
-  const now = Date.now();
-  const nextMinute = Math.ceil(now / 60000) * 60000 + 2000;
-  rateLimit.paused = true;
-  rateLimit.pauseUntil = nextMinute;
-  log(`429 received, pausing until ${new Date(nextMinute).toISOString()}`, "twelvedata");
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return { candles, ema9, ema21, ema55, ema200, bbands, macd, atr, adx };
 }
 
 export function getRateLimitState() {
   return { ...rateLimit };
 }
+
+export const __testHooks = {
+  setSleep(fn: (ms: number) => Promise<void>) {
+    sleepFn = fn;
+  },
+  resetState() {
+    rateLimit.creditsUsed = 0;
+    rateLimit.creditsLeft = PLAN_LIMIT_PER_MIN;
+    rateLimit.lastReset = Date.now();
+    rateLimit.paused = false;
+    rateLimit.pauseUntil = 0;
+    rateLimit.retryCount = 0;
+    requestQueue = Promise.resolve();
+  },
+};

@@ -1,0 +1,277 @@
+# Trading Intelligence Engine — Focused Audit Addendum
+
+This addendum addresses the requested follow-up review scope:
+1) security vulnerabilities/concerns,
+2) Twelve Data batching + credits + burst/429 behavior,
+3) data integrity/replayability.
+
+---
+
+## 1) Security Review (Secrets, Logging, Email Injection, API Key Exposure, Dependencies)
+
+### P0 — Sensitive API response logging can leak operationally sensitive data
+**Evidence**
+- API middleware captures **full JSON responses** and logs them for every `/api` request. (`capturedJsonResponse` + `JSON.stringify`).
+- `GET /api/settings` returns alert email fields and scanner controls; these are currently loggable.
+
+**Files/lines**
+- `server/index.ts:37-57` (response body logging middleware)
+- `server/routes.ts:118-133` (settings response endpoint)
+
+**Risk**
+- Secrets may not be directly present in settings table today, but this pattern makes accidental leakage highly likely when new fields are added (API keys, SMTP creds, tokens).
+
+**Exact fix**
+- Remove full-body logging for `/api/*` responses.
+- Log only: method, path, status, duration, request id.
+- Optional: allowlist safe endpoints for body logging in development only.
+
+```ts
+// server/index.ts (replace body logging branch)
+if (path.startsWith("/api")) {
+  const reqId = req.headers["x-request-id"] ?? "-";
+  log(`${req.method} ${path} ${res.statusCode} in ${duration}ms reqId=${reqId}`);
+}
+```
+
+---
+
+### P1 — Error object logging can include downstream response payloads
+**Evidence**
+- Global error handler logs raw `err` via `console.error("Internal Server Error:", err)`.
+
+**Files/lines**
+- `server/index.ts:66-71`
+
+**Risk**
+- Some libraries embed request metadata in error objects (headers, hostnames, payload snippets).
+
+**Exact fix**
+- Log structured, redacted error fields: message, name, stack in non-prod only.
+
+---
+
+### P1 — Email header/body injection exposure from unsanitized reason fields
+**Evidence**
+- Email subject/body includes interpolated values from `reasonJson` and instrument fields.
+- Body is plain text, but unsanitized `\r\n` in dynamic fields can still degrade log/mail parsing.
+
+**Files/lines**
+- `server/alerter.ts:45-67`
+
+**Risk**
+- Low-to-medium; Nodemailer generally protects header formatting, but sanitize untrusted strings before formatting emails.
+
+**Exact fix**
+- Strip CR/LF and bound length before template interpolation:
+
+```ts
+const safe = (s: unknown, max = 300) => String(s ?? "").replace(/[\r\n]+/g, " ").slice(0, max);
+```
+
+---
+
+### P1 — SMTP recipient/source can be user-configured without domain policy
+**Evidence**
+- `settings.alertToEmail` / `settings.smtpFrom` are user-updatable and used directly.
+
+**Files/lines**
+- `server/routes.ts:8-15`, `server/routes.ts:124-131`
+- `server/alerter.ts:37-39`, `server/alerter.ts:70-73`
+
+**Risk**
+- Misconfiguration/spam vector if admin UI exposure is broad.
+
+**Exact fix**
+- Enforce allowlist domain(s) for recipient/sender in server validation.
+- Add rate limiter/cooldown per strategy+instrument.
+
+---
+
+### P2 — Dependency risk review incomplete due registry policy
+**Evidence**
+- `npm audit --omit=dev --json` failed with `403 Forbidden` to npm advisory endpoint.
+
+**Risk**
+- No current vulnerability enumeration available from npm advisories in this environment.
+
+**Exact fix**
+- Run audit in CI with tokenized/allowed registry.
+- Pin lockfile refresh cadence; enable Dependabot/Renovate.
+
+---
+
+## 2) Twelve Data Review (Batching, Credit Headers, Burst Scheduling, 429)
+
+### P0 — Current request model can exceed target envelope under load
+**Evidence**
+- Per instrument/timeframe ingest issues **9 concurrent API calls** (`Promise.all`): candles + 8 indicators.
+- Rate-limit state is mutable global shared across concurrent calls, no lock.
+
+**Files/lines**
+- `server/twelvedata.ts:231-241` (concurrent fan-out)
+- `server/twelvedata.ts:29-49`, `52-57`, `81`, `108`, `134`, `160`, `186`, `212` (non-atomic accounting)
+
+**Impact math**
+- Credits per instrument for both 15m+1h in one scan pass: `9 * 2 = 18` credits.
+- With 38 instruments, one full pass ≈ `684` credits before retries.
+- This already exceeds plan limit 610/min if completed quickly; concurrency increases burst probability.
+
+**Exact fix**
+- Use queue/token-bucket with strict per-minute budget (`<=520`) and authoritative header reconciliation.
+- Do not fan out 9 in parallel; run in controlled micro-batches (e.g., 2-3 concurrent max globally).
+
+---
+
+### P0 — 429 handling degrades silently and does not retry request payloads
+**Evidence**
+- On HTTP 429 each endpoint returns `[]` after pause flag, no retry in same call stack.
+
+**Files/lines**
+- `server/twelvedata.ts:70-73`, `97-100`, `123-126`, `149-152`, `175-178`, `201-204`, `246-251`
+
+**Risk**
+- Partial indicator sets get persisted; strategy quality degrades and may become non-deterministic.
+
+**Exact fix**
+- Wrap each API request in bounded retry loop:
+  - if 429 -> sleep to next minute boundary + jitter -> retry up to N times.
+  - fail request explicitly if exhausted; mark scan_run with error metadata.
+
+---
+
+### P1 — Credit header parsing is too trusting and can drift
+**Evidence**
+- Header parsing uses `parseInt` with no NaN guard.
+- Local `creditsUsed += 1` is applied even after parsing authoritative headers.
+
+**Files/lines**
+- `server/twelvedata.ts:52-57`, `81`, `108`, `134`, `160`, `186`, `212`
+
+**Risk**
+- Incorrect local state causes under-throttling or over-throttling.
+
+**Exact fix**
+- Parse with validation; when headers present, prefer them and skip local increments.
+
+---
+
+### P1 — Burst scheduler exists but is not tied to actual credit headroom
+**Evidence**
+- Burst control is only instrument chunking + sleep (`maxSymbolsPerBurst`, `burstSleepMs`).
+- No pre-flight budget check from `api-credits-left` before next burst.
+
+**Files/lines**
+- `server/scanner.ts:43-83`
+
+**Risk**
+- High load can drain credits mid-burst and create repeated 429s.
+
+**Exact fix**
+- Before each burst: inspect rate-limit state; if remaining budget under threshold, defer to next boundary.
+
+---
+
+### Explicit compliance verdict (credits)
+- **Current system cannot guarantee <610 credits/min** in worst case. With 38 enabled symbols and 18 credits/symbol per full 15m+1h pass, one cycle is ~684 credits if compressed into a minute.
+- **Headroom to 520/min is not guaranteed** due to concurrency and lack of hard global budget enforcement.
+
+---
+
+## 3) Data Integrity Review (Unique Keys, Upserts, UTC, Duplicate Workers, Replayability)
+
+### PASS — Unique constraints and upsert keys are correctly shaped
+**Evidence**
+- Candles unique key: `(instrument_id, timeframe, datetime_utc)`.
+- Indicators unique key: `(instrument_id, timeframe, datetime_utc)`.
+- Upsert conflict targets match these keys.
+
+**Files/lines**
+- `shared/schema.ts:42-43`, `68-69`
+- `server/storage.ts:102-111`, `129-146`
+
+---
+
+### PASS/WARN — Signal dedupe exists but replayability is not strict
+**Evidence**
+- Signals upsert keyed by instrument/timeframe/strategy/direction/candle datetime.
+
+**Files/lines**
+- `shared/schema.ts:97-103`
+- `server/storage.ts:189-192`
+
+**Risk**
+- `detectedAt` updates on conflict, and strategy inputs may include partially available indicators after 429, making runs with same market inputs produce different DB side effects.
+
+**Exact fix**
+- Add stable `dedupe_key` including strategy version + closed-candle timestamp.
+- Refuse strategy eval when required indicator set for the target closed candle is incomplete.
+
+---
+
+### P0 — UTC normalization is ambiguous
+**Evidence**
+- Datetime parsing uses `new Date(c.datetime)` and `new Date(datetime)` from vendor strings.
+- DB columns are `timestamp()` without explicit timezone mode.
+
+**Files/lines**
+- `server/scanner.ts:115`, `132`
+- `shared/schema.ts:33`, `52`, `74-75`, `90-91`, `110`
+
+**Risk**
+- Runtime locale/parsing differences can create timestamp drift.
+
+**Exact fix**
+- Parse Twelve Data values as explicit UTC and use timezone-aware column definitions consistently.
+
+---
+
+### P1 — Duplicate worker prevention is local-process only
+**Evidence**
+- Scanner singleton is guarded by in-memory flag and interval handle.
+
+**Files/lines**
+- `server/scanner.ts:8-13`, `48-53`
+- `server/index.ts:100-103`
+
+**Risk**
+- In multi-instance/hot-reload environments, each process can run a scanner simultaneously.
+
+**Exact fix**
+- Use Postgres advisory lock (or leader-election row lock) before `startScanner()`.
+
+---
+
+### P0 — Replayability broken by open-candle selection fallback
+**Evidence**
+- Signal candle uses `entryCandles[1] || entryCandles[0]`; fallback may target currently-forming candle.
+
+**Files/lines**
+- `server/scanner.ts:189`
+
+**Risk**
+- Same historical inputs may not reproduce live outputs.
+
+**Exact fix**
+- Enforce explicit closed-bar selector by timeframe boundary; abort when unavailable.
+
+---
+
+## Immediate Remediation Order
+1. **P0** Remove response-body logging from API middleware and sanitize error logging.
+2. **P0** Implement hard global credit-budget throttler + bounded 429 retry.
+3. **P0** Enforce closed-candle-only evaluation and explicit UTC parsing/storage.
+4. **P1** Add distributed scanner lock + email/domain/cooldown safeguards.
+5. **P2** Restore dependency audit in CI with registry access.
+
+---
+
+## Quick Acceptance Checklist for this follow-up
+- [ ] No API response bodies are logged in production.
+- [ ] Twelve Data requests have hard budget enforcement (`<=520` target, `<610` guaranteed).
+- [ ] 429 triggers minute-boundary pause + retry; no silent empty-array fallback.
+- [ ] Closed-candle-only signal generation is guaranteed.
+- [ ] Timestamps are explicitly UTC and schema storage is timezone-safe.
+- [ ] Multi-instance duplicate scanner execution is prevented.
+- [ ] Email inputs are sanitized and constrained by policy.
+- [ ] Dependency vulnerability scan runs in CI and is visible.
