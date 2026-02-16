@@ -49,6 +49,7 @@ export interface IStorage {
   upsertScanProgress(data: InsertScanProgress): Promise<void>;
 
   getSignals(filters?: { strategy?: string; direction?: string; status?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]>;
+  findActiveSignal(instrumentId: number, timeframe: string, strategy: string, direction: string): Promise<Signal | undefined>;
   upsertSignal(data: InsertSignal): Promise<Signal>;
   updateSignalStatus(id: number, status: string): Promise<void>;
 
@@ -221,6 +222,23 @@ export class DatabaseStorage implements IStorage {
       .limit(filters?.limit ?? 100);
 
     return rows.map((r) => ({ ...r.signals, instrument: r.instruments }));
+  }
+
+  async findActiveSignal(instrumentId: number, timeframe: string, strategy: string, direction: string): Promise<Signal | undefined> {
+    const [row] = await db
+      .select()
+      .from(signals)
+      .where(
+        and(
+          eq(signals.instrumentId, instrumentId),
+          eq(signals.timeframe, timeframe),
+          eq(signals.strategy, strategy),
+          eq(signals.direction, direction),
+          eq(signals.status, "NEW"),
+        )
+      )
+      .limit(1);
+    return row;
   }
 
   async upsertSignal(data: InsertSignal): Promise<Signal> {

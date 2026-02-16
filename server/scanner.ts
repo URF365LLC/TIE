@@ -248,6 +248,11 @@ async function processInstrument(inst: Instrument): Promise<number> {
 
   let signalCount = 0;
   for (const result of stratResults) {
+    const existing = await storage.findActiveSignal(inst.id, "15m", result.strategy, result.direction);
+    if (existing) {
+      continue;
+    }
+
     const signal = await storage.upsertSignal({
       instrumentId: inst.id,
       timeframe: "15m",
