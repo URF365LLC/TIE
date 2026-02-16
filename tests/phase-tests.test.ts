@@ -43,8 +43,8 @@ test("formatAlertEmail produces sanitized subject/body", () => {
   assert.equal(body.includes("\r"), false);
 });
 
-test("crypto mapping uses KuCoin", () => {
-  assert.equal(canonicalToVendor("BTCUSD", "CRYPTO"), "BTC/USD:KuCoin");
+test("crypto mapping uses plain pair", () => {
+  assert.equal(canonicalToVendor("BTCUSD", "CRYPTO"), "BTC/USD");
 });
 
 test("getLatestClosedCandle selects only closed bar", () => {

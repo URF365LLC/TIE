@@ -181,12 +181,10 @@ export const WHITELIST = {
   CRYPTO: ["BTCUSD","ETHUSD","SOLUSD","XRPUSD","ADAUSD","BCHUSD","BNBUSD","LTCUSD"],
 } as const;
 
-export function canonicalToVendor(canonical: string, assetClass: string): string {
+export function canonicalToVendor(canonical: string, _assetClass: string): string {
   const base = canonical.slice(0, 3);
   const quote = canonical.slice(3);
-  const pair = `${base}/${quote}`;
-  if (assetClass === "CRYPTO") return `${pair}:KuCoin`;
-  return pair;
+  return `${base}/${quote}`;
 }
 
 export type SignalWithInstrument = Signal & { instrument: Instrument };

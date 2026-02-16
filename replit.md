@@ -50,7 +50,7 @@ Analysis-only trading intelligence platform that scans markets using Twelve Data
 
 ## Trading Universe
 - 28 Forex pairs, 2 Metals (XAU/USD, XAG/USD), 8 Crypto pairs
-- Symbols normalized: canonical (EURUSD) -> vendor (EUR/USD), crypto uses :Huobi suffix
+- Symbols normalized: canonical (EURUSD) -> vendor (EUR/USD), all asset classes use plain pair format
 
 ## Strategies
 1. **TREND_CONTINUATION** - Uses 1h bias (EMA200 slope) + 15m entry (EMA stack, pullback, MACD, ADX>=18)
