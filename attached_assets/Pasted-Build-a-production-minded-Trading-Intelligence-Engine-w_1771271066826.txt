@@ -1,0 +1,226 @@
+Build a production-minded “Trading Intelligence Engine” web app in TypeScript on Replit with:
+
+GOAL
+- Analysis-only trading engine (no execution yet).
+- 24/7 background scanning (intraday first) across a strict whitelist of instruments.
+- Data persistence + consistency in Postgres (Replit SQL Database / Neon Postgres).
+- Twelve Data API is the ONLY market data + indicator source (no local indicator math for now).
+- Credit-aware rate limiting + batching to prevent Twelve Data 429 errors.
+- Email alerts when a new qualified setup appears.
+
+TECH STACK (REPLIT-FRIENDLY)
+- Next.js (App Router) + TypeScript for UI + API routes
+- Prisma ORM
+- Postgres via Replit SQL Database (use DATABASE_URL)
+- Background worker started alongside the web server (single-instance design for now)
+- Nodemailer for outbound alerts (SMTP via env vars)
+- Minimal UI: Dashboard + Signals + Symbol view (chart) + Settings
+
+STRICT TRADING UNIVERSE (WHITELIST)
+Forex (28):
+AUDCAD, AUDCHF, AUDJPY, AUDNZD, AUDUSD,
+CADCHF, CADJPY,
+CHFJPY,
+EURAUD, EURCAD, EURCHF, EURGBP, EURJPY, EURNZD, EURUSD,
+GBPAUD, GBPCAD, GBPCHF, GBPJPY, GBPNZD, GBPUSD,
+NZDCAD, NZDCHF, NZDJPY, NZDUSD,
+USDCAD, USDCHF, USDJPY
+
+Metals (2):
+XAUUSD, XAGUSD
+
+Crypto (8):
+BTCUSD, ETHUSD, SOLUSD, XRPUSD, ADAUSD, BCHUSD, BNBUSD, LTCUSD
+
+SYMBOL NORMALIZATION (IMPORTANT)
+- Canonical symbols are the whitelist codes above (e.g., EURUSD).
+- Map to Twelve Data symbols:
+  - Forex: EURUSD -> "EUR/USD"
+  - Metals: XAUUSD -> "XAU/USD", XAGUSD -> "XAG/USD"
+  - Crypto: BTCUSD -> "BTC/USD"
+- KuCoin requirement for crypto: use Twelve Data “exchange suffix” format:
+  - Example: "BTC/USD:KuCoin" (case-insensitive handling, store exact exchange label)
+- On startup, validate KuCoin is supported by Twelve Data by calling:
+  - GET /cryptocurrency_exchanges
+- If a crypto pair is not available for KuCoin in Twelve Data, mark that instrument as disabled and show it in UI.
+
+TIMEFRAMES (INTRADAY-FIRST, BUT EXTENDABLE)
+- Bias timeframe: 1h
+- Entry timeframe: 15min
+- Later expansion: 4h, 1d (structure it so it’s easy)
+
+INDICATORS (PULLED FROM TWELVE DATA INDICATOR ENDPOINTS)
+For EACH symbol + timeframe, fetch:
+- EMA: 9, 21, 55, 200
+- BBANDS: period 20, stddev 2
+- MACD: default (12,26,9) unless Twelve Data requires explicit params
+- ATR: 14
+- ADX: 14
+
+NOTE: Do NOT compute these locally. Pull from Twelve Data endpoints:
+- /ema
+- /bbands
+- /macd (or /macdext if needed)
+- /atr
+- /adx
+Also fetch candles from:
+- /time_series
+
+TWELVE DATA BATCHING + RATE LIMITING (CRITICAL)
+Implement a TwelveDataClient wrapper that supports BOTH:
+1) Batch by query param (same endpoint, many symbols):
+   - /time_series?symbol=EUR/USD,USD/JPY,... (comma-separated)
+2) Multi-endpoint JSON POST batching:
+   - POST to Twelve Data API with a JSON body:
+     { "req1": "/time_series?symbol=EUR/USD&interval=15min&outputsize=300",
+       "req2": "/ema?symbol=EUR/USD&interval=15min&time_period=9&outputsize=300",
+       ...
+     }
+   Then append apikey appropriately.
+
+Credit policy:
+- Plan: 610 credits/min
+- Keep headroom: target 520 credits/min max usage
+- Read response headers: api-credits-used and api-credits-left
+- If 429 occurs: pause until the next minute boundary, then retry
+- Burst rounds:
+  - Process in chunks of 4 symbols per burst, with a configurable sleep (e.g., 800–1500ms) between bursts.
+- Make scanning cadence align to bar close:
+  - For 15m: run shortly after each 15m boundary (e.g., +10 seconds)
+  - For 1h bias: refresh hourly
+
+DATA MODEL (PRISMA + POSTGRES)
+Create tables:
+1) instruments
+- id, canonical_symbol (EURUSD), asset_class (FOREX|METAL|CRYPTO), vendor_symbol (EUR/USD or BTC/USD:KuCoin), enabled, created_at, updated_at
+
+2) candles
+- id, instrument_id, timeframe (15m|1h), datetime_utc, open, high, low, close, volume (nullable), source="twelvedata"
+- UNIQUE(instrument_id, timeframe, datetime_utc)
+
+3) indicators
+- id, instrument_id, timeframe, datetime_utc
+- ema9, ema21, ema55, ema200
+- bb_upper, bb_middle, bb_lower, bb_width
+- macd, macd_signal, macd_hist
+- atr, adx
+- UNIQUE(instrument_id, timeframe, datetime_utc)
+
+4) scan_runs
+- id, started_at, finished_at, timeframe, status, credits_used_est, notes
+
+5) signals
+- id, instrument_id, timeframe, strategy (TREND_CONTINUATION|RANGE_BREAKOUT), direction (LONG|SHORT)
+- detected_at, candle_datetime_utc, score (0-100), reason_json, status (NEW|ALERTED|IGNORED)
+- UNIQUE(instrument_id, timeframe, strategy, direction, candle_datetime_utc)
+
+6) alert_events
+- id, signal_id, sent_at, channel (EMAIL), to, subject, status, error
+
+7) settings (single-row)
+- scan_enabled, email_enabled, alert_to_email, smtp_from, min_score_to_alert, quiet_hours_json, max_symbols_per_burst, burst_sleep_ms
+
+PIPELINE (END-TO-END DATA FLOW)
+A) Ingestion
+- For each symbol/timeframe:
+  - Pull last N candles (e.g., outputsize 300) via /time_series
+  - Pull indicator series via /ema, /bbands, /macd, /atr, /adx
+  - Upsert into candles + indicators by datetime_utc
+  - Only evaluate strategies on the most recently CLOSED candle
+
+B) Strategy evaluation (simple + symmetric long/short)
+Strategy 1: TREND_CONTINUATION (intraday)
+- Bias from 1h:
+  - LONG bias if close > ema200 AND ema200 slope up (compare ema200 now vs 3 bars ago)
+  - SHORT bias if close < ema200 AND ema200 slope down
+- Entry on 15m in direction of bias:
+  - EMA stack alignment (for LONG: ema9 > ema21 > ema55; for SHORT inverse)
+  - Pullback condition:
+    - LONG: close reclaims above ema21 after dipping near ema21/ema55 zone
+    - SHORT: close reclaims below ema21 after tagging zone
+  - Momentum confirmation:
+    - MACD histogram supports direction (>=0 for LONG, <=0 for SHORT)
+  - Regime filter:
+    - ADX >= 18 for trend-mode
+- Score the setup (0–100) with weighted rules and store reason_json.
+
+Strategy 2: RANGE_BREAKOUT (intraday)
+- Range regime on 15m:
+  - ADX <= 18 and BB width below a rolling threshold (e.g., BB_width < median(BB_width, last 50 bars))
+- Define range:
+  - last 20 bars high/low
+- Breakout trigger:
+  - LONG: close breaks above range_high AND close >= bb_upper
+  - SHORT: close breaks below range_low AND close <= bb_lower
+- ATR-based stop suggestion:
+  - stop_distance = 1.2 * ATR
+- Score + reason_json.
+
+C) Alerting
+- If a signal is NEW and score >= settings.min_score_to_alert:
+  - Send email with:
+    - Symbol, direction, strategy, timeframe
+    - Key levels: entry reference, ATR stop distance, range levels if breakout
+    - Short bullet explanation derived from reason_json
+  - Mark signal as ALERTED and log alert_events row.
+
+BACKGROUND SCANNER (ALWAYS-ON)
+- Implement /worker/scanner.ts:
+  - Runs in a loop aligned to 15m closes
+  - Uses settings.scan_enabled
+  - Processes instruments in bursts to respect credit limits
+- Ensure the web app starts both:
+  - Next.js server
+  - scanner worker (single process using setInterval or a small in-process scheduler)
+
+UI REQUIREMENTS
+1) Dashboard
+- scan status (ON/OFF), last scan time, credits/burst settings
+- latest signals list with filters
+
+2) Signals page
+- table of signals with filters (strategy, direction, symbol)
+- click signal to view detail
+
+3) Symbol view
+- show recent candles (15m)
+- overlay EMA 9/21/55/200 and BBANDS
+- list recent signals under chart
+
+4) Settings page
+- toggle scan, set min_score_to_alert, burst sizing, sleep ms
+- email settings (to/from)
+
+API ROUTES
+- GET /api/instruments
+- POST /api/instruments/seed (seeds whitelist + normalized vendor symbols)
+- GET /api/candles?symbol=EURUSD&tf=15m
+- GET /api/indicators?symbol=EURUSD&tf=15m
+- GET /api/signals?tf=15m&status=NEW
+- POST /api/scan/run (manual scan trigger)
+- POST /api/settings (update settings)
+
+SECRETS / ENV VARS
+- TWELVEDATA_API_KEY
+- DATABASE_URL (provided by Replit DB integration)
+- SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
+- SMTP_FROM_EMAIL
+- ALERT_TO_EMAIL
+- OPTIONAL: OPENAI_API_KEY (future “Explain this signal” assistant; create stub only)
+
+DELIVERABLES / ACCEPTANCE
+- Project boots cleanly
+- Prisma migrations run
+- Seed endpoint creates instruments with correct Twelve Data mapping
+- Manual scan works for 1–2 symbols without hitting rate limits
+- Background scan runs and logs scan_runs
+- Signals get created and displayed
+- Email sends for qualifying signals (when SMTP configured)
+- Clear README with:
+  - how to set secrets
+  - how to run dev
+  - how to deploy always-on (Reserved VM recommended for continuous background tasks)
+
+DO NOT OVER-ENGINEER
+- Keep this as a clean MVP focused on correct data flow, persistence, and reliable scanning.
+- No MT5 bridge now (just leave a placeholder folder /execution for later).
