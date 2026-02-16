@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { TrendingUp, TrendingDown, Zap, Filter, X } from "lucide-react";
+import { TrendingUp, TrendingDown, Zap, Filter, X, ChevronDown, ChevronUp, Target, ShieldAlert, CircleDollarSign, Crosshair } from "lucide-react";
 import { Link } from "wouter";
 import type { SignalWithInstrument } from "@shared/schema";
 
@@ -13,6 +13,7 @@ export default function SignalsPage() {
   const [strategyFilter, setStrategyFilter] = useState<string>("all");
   const [directionFilter, setDirectionFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [expandedId, setExpandedId] = useState<number | null>(null);
 
   const queryParams = new URLSearchParams();
   if (strategyFilter !== "all") queryParams.set("strategy", strategyFilter);
@@ -107,70 +108,185 @@ export default function SignalsPage() {
               )}
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm" data-testid="table-signals">
-                <thead>
-                  <tr className="border-b text-left">
-                    <th className="p-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Symbol</th>
-                    <th className="p-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Direction</th>
-                    <th className="p-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Strategy</th>
-                    <th className="p-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Timeframe</th>
-                    <th className="p-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Score</th>
-                    <th className="p-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Status</th>
-                    <th className="p-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Detected</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {signals.map((sig) => (
-                    <tr key={sig.id} className="border-b last:border-0 hover-elevate" data-testid={`signal-row-${sig.id}`}>
-                      <td className="p-3">
-                        <Link href={`/instruments/${sig.instrument.canonicalSymbol}`}>
-                          <span className="font-medium hover:underline cursor-pointer" data-testid={`link-symbol-${sig.instrument.canonicalSymbol}`}>
-                            {sig.instrument.canonicalSymbol}
-                          </span>
-                        </Link>
-                      </td>
-                      <td className="p-3">
-                        <div className="flex items-center gap-1.5">
-                          {sig.direction === "LONG" ? (
-                            <TrendingUp className="w-3.5 h-3.5 text-emerald-500" />
-                          ) : (
-                            <TrendingDown className="w-3.5 h-3.5 text-red-500" />
-                          )}
-                          <span className={sig.direction === "LONG" ? "text-emerald-500" : "text-red-500"}>
-                            {sig.direction}
-                          </span>
+            <div className="divide-y">
+              {signals.map((sig) => {
+                const reason = (sig.reasonJson ?? {}) as Record<string, any>;
+                const isExpanded = expandedId === sig.id;
+                const hasLevels = reason.entryPrice != null;
+
+                return (
+                  <div key={sig.id} data-testid={`signal-row-${sig.id}`}>
+                    <div
+                      className="flex items-center justify-between p-4 cursor-pointer hover-elevate"
+                      onClick={() => setExpandedId(isExpanded ? null : sig.id)}
+                      data-testid={`signal-toggle-${sig.id}`}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={`flex items-center justify-center w-9 h-9 rounded-md shrink-0 ${sig.direction === "LONG" ? "bg-emerald-500/10 text-emerald-500 dark:bg-emerald-500/20" : "bg-red-500/10 text-red-500 dark:bg-red-500/20"}`}>
+                          {sig.direction === "LONG" ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
                         </div>
-                      </td>
-                      <td className="p-3">
-                        <Badge variant="secondary" className="text-[10px]">
-                          {sig.strategy.replace("_", " ")}
-                        </Badge>
-                      </td>
-                      <td className="p-3 text-muted-foreground">{sig.timeframe}</td>
-                      <td className="p-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <Link href={`/instruments/${sig.instrument.canonicalSymbol}`}>
+                              <span className="text-sm font-semibold hover:underline" data-testid={`link-symbol-${sig.instrument.canonicalSymbol}`}>
+                                {sig.instrument.canonicalSymbol}
+                              </span>
+                            </Link>
+                            <Badge variant="secondary" className="text-[10px]">
+                              {sig.strategy.replace(/_/g, " ")}
+                            </Badge>
+                            <Badge
+                              variant={sig.status === "NEW" ? "default" : sig.status === "ALERTED" ? "secondary" : "outline"}
+                              className="text-[10px]"
+                            >
+                              {sig.status}
+                            </Badge>
+                          </div>
+                          <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground flex-wrap">
+                            <span>{sig.timeframe}</span>
+                            <span>{new Date(sig.detectedAt).toLocaleString()}</span>
+                            {hasLevels && (
+                              <span className="hidden sm:inline">
+                                Entry: {formatPrice(reason.entryPrice)}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {hasLevels && (
+                          <div className="hidden md:flex items-center gap-3 mr-3 text-xs">
+                            <span className="text-red-400">SL {formatPrice(reason.stopLoss)}</span>
+                            <span className="text-emerald-400">TP {formatPrice(reason.takeProfit)}</span>
+                          </div>
+                        )}
                         <ScoreBadge score={sig.score} />
-                      </td>
-                      <td className="p-3">
-                        <Badge
-                          variant={sig.status === "NEW" ? "default" : sig.status === "ALERTED" ? "secondary" : "outline"}
-                          className="text-[10px]"
-                        >
-                          {sig.status}
+                        <Badge variant={sig.direction === "LONG" ? "default" : "destructive"} className="text-[10px]">
+                          {sig.direction}
                         </Badge>
-                      </td>
-                      <td className="p-3 text-muted-foreground text-xs">
-                        {new Date(sig.detectedAt).toLocaleString()}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                        {isExpanded ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+                      </div>
+                    </div>
+
+                    {isExpanded && (
+                      <div className="px-4 pb-4" data-testid={`signal-detail-${sig.id}`}>
+                        <div className="rounded-md border p-4 space-y-4 bg-muted/30">
+                          {hasLevels && (
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                              <LevelCard
+                                icon={<Crosshair className="w-3.5 h-3.5" />}
+                                label="Entry Price"
+                                value={formatPrice(reason.entryPrice)}
+                                color="text-foreground"
+                              />
+                              <LevelCard
+                                icon={<ShieldAlert className="w-3.5 h-3.5" />}
+                                label="Stop Loss"
+                                value={formatPrice(reason.stopLoss)}
+                                color="text-red-400"
+                              />
+                              <LevelCard
+                                icon={<Target className="w-3.5 h-3.5" />}
+                                label="Take Profit"
+                                value={formatPrice(reason.takeProfit)}
+                                color="text-emerald-400"
+                              />
+                              <LevelCard
+                                icon={<CircleDollarSign className="w-3.5 h-3.5" />}
+                                label="Risk : Reward"
+                                value={reason.riskRewardRatio || "—"}
+                                color="text-foreground"
+                              />
+                            </div>
+                          )}
+
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-2 text-xs">
+                            {reason.atr != null && (
+                              <DetailItem label="ATR" value={formatPrice(reason.atr)} />
+                            )}
+                            {reason.stopDistance != null && (
+                              <DetailItem label="Stop Distance" value={formatPrice(reason.stopDistance)} />
+                            )}
+                            {reason.adx != null && (
+                              <DetailItem label="ADX" value={String(reason.adx)} />
+                            )}
+                            {reason.ema21Zone != null && (
+                              <DetailItem label="EMA21 Zone" value={formatPrice(reason.ema21Zone)} />
+                            )}
+                            {reason.ema55Zone != null && (
+                              <DetailItem label="EMA55 Zone" value={formatPrice(reason.ema55Zone)} />
+                            )}
+                            {reason.rangeHigh != null && (
+                              <DetailItem label="Range High" value={formatPrice(reason.rangeHigh)} />
+                            )}
+                            {reason.rangeLow != null && (
+                              <DetailItem label="Range Low" value={formatPrice(reason.rangeLow)} />
+                            )}
+                            {reason.bbWidth != null && (
+                              <DetailItem label="BB Width" value={formatPrice(reason.bbWidth)} />
+                            )}
+                          </div>
+
+                          <div>
+                            <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-2">Signal Reasoning</p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {reason.bias && <ReasonChip label="Bias" value={String(reason.bias)} />}
+                              {reason.emaStack && <ReasonChip label="EMA Stack" value={String(reason.emaStack)} />}
+                              {reason.pullback && <ReasonChip label="Pullback" value={String(reason.pullback)} />}
+                              {reason.macd && <ReasonChip label="MACD" value={String(reason.macd)} />}
+                              {reason.breakout && <ReasonChip label="Breakout" value={String(reason.breakout)} />}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+function formatPrice(value: number | string | undefined): string {
+  if (value == null) return "—";
+  const num = typeof value === "string" ? parseFloat(value) : value;
+  if (isNaN(num)) return "—";
+  if (Math.abs(num) >= 100) return num.toFixed(2);
+  if (Math.abs(num) >= 1) return num.toFixed(4);
+  return num.toFixed(5);
+}
+
+function LevelCard({ icon, label, value, color }: { icon: React.ReactNode; label: string; value: string; color: string }) {
+  return (
+    <div className="rounded-md border p-3 bg-background" data-testid={`level-${label.toLowerCase().replace(/\s/g, "-")}`}>
+      <div className="flex items-center gap-1.5 mb-1">
+        <span className="text-muted-foreground">{icon}</span>
+        <span className="text-[11px] text-muted-foreground font-medium">{label}</span>
+      </div>
+      <span className={`text-sm font-semibold ${color}`}>{value}</span>
+    </div>
+  );
+}
+
+function DetailItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between py-1" data-testid={`detail-${label.toLowerCase().replace(/\s/g, "-")}`}>
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-medium">{value}</span>
+    </div>
+  );
+}
+
+function ReasonChip({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] bg-background">
+      <span className="font-medium">{label}:</span>
+      <span className="text-muted-foreground">{value}</span>
+    </span>
   );
 }
 

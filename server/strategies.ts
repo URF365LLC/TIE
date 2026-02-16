@@ -113,8 +113,20 @@ function evaluateTrendContinuation(input: StrategyInput): StrategyResult | null 
     reasons.adx = `trending (${latestEntry.adx!.toFixed(1)})`;
   }
 
-  reasons.atr = latestEntry.atr;
-  reasons.stopDistance = (1.2 * latestEntry.atr!).toFixed(5);
+  const entryPrice = latestClosed.close;
+  const atr = latestEntry.atr!;
+  const stopDist = 1.2 * atr;
+  const stopLoss = direction === "LONG" ? entryPrice - stopDist : entryPrice + stopDist;
+  const takeProfit = direction === "LONG" ? entryPrice + stopDist * 2 : entryPrice - stopDist * 2;
+
+  reasons.entryPrice = parseFloat(entryPrice.toFixed(5));
+  reasons.stopLoss = parseFloat(stopLoss.toFixed(5));
+  reasons.takeProfit = parseFloat(takeProfit.toFixed(5));
+  reasons.atr = parseFloat(atr.toFixed(5));
+  reasons.stopDistance = parseFloat(stopDist.toFixed(5));
+  reasons.riskRewardRatio = "1:2";
+  reasons.ema21Zone = parseFloat(ema21Val.toFixed(5));
+  reasons.ema55Zone = parseFloat(ema55Val.toFixed(5));
 
   if (score < 40) return null;
 
@@ -145,14 +157,17 @@ function evaluateRangeBreakout(input: StrategyInput): StrategyResult | null {
   const rangeHigh = Math.max(...baseRange.map((c) => c.high));
   const rangeLow = Math.min(...baseRange.map((c) => c.low));
 
+  const atr = latestInd.atr!;
+  const stopDist = 1.2 * atr;
+
   const reasons: Record<string, any> = {
-    adx: latestInd.adx,
-    bbWidth: latestInd.bbWidth,
-    medianBBWidth: median,
-    rangeHigh,
-    rangeLow,
-    atr: latestInd.atr,
-    stopDistance: (1.2 * latestInd.atr!).toFixed(5),
+    adx: parseFloat(latestInd.adx!.toFixed(1)),
+    bbWidth: parseFloat(latestInd.bbWidth!.toFixed(5)),
+    medianBBWidth: parseFloat(median.toFixed(5)),
+    rangeHigh: parseFloat(rangeHigh.toFixed(5)),
+    rangeLow: parseFloat(rangeLow.toFixed(5)),
+    atr: parseFloat(atr.toFixed(5)),
+    stopDistance: parseFloat(stopDist.toFixed(5)),
   };
 
   let direction: "LONG" | "SHORT" | null = null;
@@ -174,6 +189,15 @@ function evaluateRangeBreakout(input: StrategyInput): StrategyResult | null {
   }
 
   if (!direction) return null;
+
+  const entryPrice = latestClosed.close;
+  const stopLoss = direction === "LONG" ? entryPrice - stopDist : entryPrice + stopDist;
+  const takeProfit = direction === "LONG" ? entryPrice + stopDist * 2 : entryPrice - stopDist * 2;
+
+  reasons.entryPrice = parseFloat(entryPrice.toFixed(5));
+  reasons.stopLoss = parseFloat(stopLoss.toFixed(5));
+  reasons.takeProfit = parseFloat(takeProfit.toFixed(5));
+  reasons.riskRewardRatio = "1:2";
 
   return { strategy: "RANGE_BREAKOUT", direction, score: Math.min(score, 100), reasonJson: reasons };
 }
