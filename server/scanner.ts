@@ -1,15 +1,43 @@
 import { storage } from "./storage";
-import { fetchAllIndicatorsForSymbol } from "./twelvedata";
-import { evaluateStrategies } from "./strategies";
+import { db } from "./db";
+import { sql } from "drizzle-orm";
+import { fetchAllIndicatorsForSymbol, getRateLimitState } from "./twelvedata";
+import { evaluateStrategies, hasRequiredIndicators } from "./strategies";
 import { sendSignalAlert } from "./alerter";
-import { log } from "./index";
-import type { Instrument, InsertCandle, InsertIndicator } from "@shared/schema";
+import { log } from "./logger";
+import type { Instrument, InsertCandle, InsertIndicator, Candle, Indicator } from "@shared/schema";
 
 let scannerInterval: NodeJS.Timeout | null = null;
 let isScanning = false;
 
-export function startScanner(): void {
+function parseUtc(datetime: string): Date {
+  if (/Z$/.test(datetime) || /[+-]\d\d:\d\d$/.test(datetime)) {
+    return new Date(datetime);
+  }
+  return new Date(`${datetime.replace(" ", "T")}Z`);
+}
+
+export function getLatestClosedCandle(candles: Candle[], timeframe: "15m" | "1h", now = new Date()): Candle | null {
+  if (!candles.length) return null;
+  const tfMs = timeframe === "15m" ? 15 * 60 * 1000 : 60 * 60 * 1000;
+  const nowMs = now.getTime();
+  return candles.find((c) => c.datetimeUtc.getTime() + tfMs <= nowMs) ?? null;
+}
+
+function indicatorsCompleteForCandle(candle: Candle, indicators: Indicator[]): boolean {
+  const ind = indicators.find((i) => i.datetimeUtc.getTime() === candle.datetimeUtc.getTime());
+  return hasRequiredIndicators(ind);
+}
+
+export async function startScanner(): Promise<void> {
   if (scannerInterval) return;
+
+  const lock = await db.execute(sql`select pg_try_advisory_lock(424242) as acquired`);
+  const acquired = (lock.rows[0] as any)?.acquired === true;
+  if (!acquired) {
+    log("Scanner advisory lock not acquired; another worker is active", "scanner");
+    return;
+  }
 
   log("Scanner started - checking every 60s for alignment", "scanner");
 
@@ -19,7 +47,7 @@ export function startScanner(): void {
       if (!settings.scanEnabled) return;
 
       const now = new Date();
-      const minutes = now.getMinutes();
+      const minutes = now.getUTCMinutes();
 
       if (minutes % 15 === 0 || minutes % 15 === 1) {
         if (!isScanning) {
@@ -40,11 +68,7 @@ export function stopScanner(): void {
   }
 }
 
-export async function runScanCycle(
-  timeframe: string,
-  maxPerBurst: number = 4,
-  burstSleepMs: number = 1000
-): Promise<void> {
+export async function runScanCycle(timeframe: string, maxPerBurst: number = 4, burstSleepMs: number = 1000): Promise<void> {
   if (isScanning) {
     log("Scan already in progress, skipping", "scanner");
     return;
@@ -63,6 +87,7 @@ export async function runScanCycle(
     const instruments = await storage.getEnabledInstruments();
     let processedCount = 0;
     let signalCount = 0;
+    const failures: Array<{ symbol: string; error: string }> = [];
 
     for (let i = 0; i < instruments.length; i += maxPerBurst) {
       const burst = instruments.slice(i, i + maxPerBurst);
@@ -73,6 +98,7 @@ export async function runScanCycle(
           signalCount += count;
           processedCount++;
         } catch (err: any) {
+          failures.push({ symbol: inst.canonicalSymbol, error: err.message });
           log(`Error processing ${inst.canonicalSymbol}: ${err.message}`, "scanner");
         }
       }
@@ -82,10 +108,12 @@ export async function runScanCycle(
       }
     }
 
+    const rl = getRateLimitState();
     await storage.updateScanRun(scanRun.id, {
       finishedAt: new Date(),
-      status: "completed",
-      notes: `Processed ${processedCount}/${instruments.length} instruments, ${signalCount} signals`,
+      status: failures.length ? "completed_with_errors" : "completed",
+      creditsUsedEst: rl.creditsUsed,
+      notes: JSON.stringify({ processedCount, total: instruments.length, signalCount, failures, retryCount: rl.retryCount }),
     });
 
     log(`Scan completed: ${processedCount} instruments, ${signalCount} signals`, "scanner");
@@ -112,7 +140,7 @@ async function ingestData(inst: Instrument, timeframe: string, interval: string)
   const candleRows: InsertCandle[] = data.candles.map((c: any) => ({
     instrumentId: inst.id,
     timeframe,
-    datetimeUtc: new Date(c.datetime),
+    datetimeUtc: parseUtc(c.datetime),
     open: parseFloat(c.open),
     high: parseFloat(c.high),
     low: parseFloat(c.low),
@@ -129,22 +157,22 @@ async function ingestData(inst: Instrument, timeframe: string, interval: string)
       indicatorMap.set(datetime, {
         instrumentId: inst.id,
         timeframe,
-        datetimeUtc: new Date(datetime),
+        datetimeUtc: parseUtc(datetime),
       });
     }
     return indicatorMap.get(datetime)!;
   };
 
-  for (const v of data.ema9) { getOrCreate(v.datetime).ema9 = parseFloat(v.ema); }
-  for (const v of data.ema21) { getOrCreate(v.datetime).ema21 = parseFloat(v.ema); }
-  for (const v of data.ema55) { getOrCreate(v.datetime).ema55 = parseFloat(v.ema); }
-  for (const v of data.ema200) { getOrCreate(v.datetime).ema200 = parseFloat(v.ema); }
+  for (const v of data.ema9) getOrCreate(v.datetime).ema9 = parseFloat(v.ema);
+  for (const v of data.ema21) getOrCreate(v.datetime).ema21 = parseFloat(v.ema);
+  for (const v of data.ema55) getOrCreate(v.datetime).ema55 = parseFloat(v.ema);
+  for (const v of data.ema200) getOrCreate(v.datetime).ema200 = parseFloat(v.ema);
   for (const v of data.bbands) {
     const row = getOrCreate(v.datetime);
     row.bbUpper = parseFloat(v.upper_band);
     row.bbMiddle = parseFloat(v.middle_band);
     row.bbLower = parseFloat(v.lower_band);
-    if (row.bbUpper && row.bbLower && row.bbMiddle) {
+    if (row.bbUpper != null && row.bbLower != null && row.bbMiddle != null) {
       row.bbWidth = (row.bbUpper - row.bbLower) / row.bbMiddle;
     }
   }
@@ -154,12 +182,10 @@ async function ingestData(inst: Instrument, timeframe: string, interval: string)
     row.macdSignal = parseFloat(v.macd_signal);
     row.macdHist = parseFloat(v.macd_histogram);
   }
-  for (const v of data.atr) { getOrCreate(v.datetime).atr = parseFloat(v.atr); }
-  for (const v of data.adx) { getOrCreate(v.datetime).adx = parseFloat(v.adx); }
+  for (const v of data.atr) getOrCreate(v.datetime).atr = parseFloat(v.atr);
+  for (const v of data.adx) getOrCreate(v.datetime).adx = parseFloat(v.adx);
 
-  const indRows = Array.from(indicatorMap.values()).filter(
-    (r) => r.instrumentId && r.timeframe && r.datetimeUtc
-  ) as InsertIndicator[];
+  const indRows = Array.from(indicatorMap.values()).filter((r) => r.instrumentId && r.timeframe && r.datetimeUtc) as InsertIndicator[];
 
   await storage.upsertIndicators(indRows);
 }
@@ -173,26 +199,47 @@ async function processInstrument(inst: Instrument): Promise<number> {
   const biasCandles = await storage.getCandles(inst.id, "1h", 20);
   const biasIndicators = await storage.getIndicators(inst.id, "1h", 20);
 
-  if (!entryCandles.length) return 0;
+  const now = new Date();
+  const latestClosedEntry = getLatestClosedCandle(entryCandles, "15m", now);
+  const latestClosedBias = getLatestClosedCandle(biasCandles, "1h", now);
+
+  if (!latestClosedEntry || !latestClosedBias) return 0;
+
+  const progress = await storage.getScanProgress(inst.id, "15m");
+  if (progress && progress.lastProcessedBarUtc.getTime() >= latestClosedEntry.datetimeUtc.getTime()) {
+    return 0;
+  }
+
+  const entryForEval = entryCandles.filter((c) => c.datetimeUtc.getTime() <= latestClosedEntry.datetimeUtc.getTime());
+  const biasForEval = biasCandles.filter((c) => c.datetimeUtc.getTime() <= latestClosedBias.datetimeUtc.getTime());
+
+  if (!entryForEval.length || !biasForEval.length) return 0;
+
+  if (!indicatorsCompleteForCandle(latestClosedEntry, entryIndicators)) {
+    log(
+      JSON.stringify({ event: "data_quality_gate", symbol: inst.canonicalSymbol, timeframe: "15m", candle: latestClosedEntry.datetimeUtc.toISOString(), reason: "missing_indicators" }),
+      "scanner"
+    );
+    return 0;
+  }
 
   const stratResults = evaluateStrategies({
     instrumentId: inst.id,
-    entryCandles,
+    entryCandles: entryForEval,
     entryIndicators,
-    biasCandles,
+    biasCandles: biasForEval,
     biasIndicators,
     entryTimeframe: "15m",
   });
 
   let signalCount = 0;
   for (const result of stratResults) {
-    const closedCandle = entryCandles[1] || entryCandles[0];
     const signal = await storage.upsertSignal({
       instrumentId: inst.id,
       timeframe: "15m",
       strategy: result.strategy,
       direction: result.direction,
-      candleDatetimeUtc: closedCandle.datetimeUtc,
+      candleDatetimeUtc: latestClosedEntry.datetimeUtc,
       score: result.score,
       reasonJson: result.reasonJson,
       status: "NEW",
@@ -205,6 +252,8 @@ async function processInstrument(inst: Instrument): Promise<number> {
       await sendSignalAlert(signal, inst, result.reasonJson, settings);
     }
   }
+
+  await storage.upsertScanProgress({ instrumentId: inst.id, timeframe: "15m", lastProcessedBarUtc: latestClosedEntry.datetimeUtc });
 
   return signalCount;
 }

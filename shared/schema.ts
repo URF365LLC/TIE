@@ -74,10 +74,22 @@ export const scanRuns = pgTable("scan_runs", {
   startedAt: timestamp("started_at").notNull().defaultNow(),
   finishedAt: timestamp("finished_at"),
   timeframe: varchar("timeframe", { length: 5 }).notNull(),
-  status: varchar("status", { length: 20 }).notNull().default("running"),
+  status: varchar("status", { length: 40 }).notNull().default("running"),
   creditsUsedEst: integer("credits_used_est"),
   notes: text("notes"),
 });
+
+export const scanProgress = pgTable(
+  "scan_progress",
+  {
+    id: serial("id").primaryKey(),
+    instrumentId: integer("instrument_id").notNull().references(() => instruments.id),
+    timeframe: varchar("timeframe", { length: 5 }).notNull(),
+    lastProcessedBarUtc: timestamp("last_processed_bar_utc").notNull(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("scan_progress_unique_idx").on(table.instrumentId, table.timeframe)]
+);
 
 export const signals = pgTable(
   "signals",
@@ -131,6 +143,7 @@ export const insertInstrumentSchema = createInsertSchema(instruments).omit({ id:
 export const insertCandleSchema = createInsertSchema(candles).omit({ id: true });
 export const insertIndicatorSchema = createInsertSchema(indicators).omit({ id: true });
 export const insertScanRunSchema = createInsertSchema(scanRuns).omit({ id: true });
+export const insertScanProgressSchema = createInsertSchema(scanProgress).omit({ id: true, updatedAt: true });
 export const insertSignalSchema = createInsertSchema(signals).omit({ id: true });
 export const insertAlertEventSchema = createInsertSchema(alertEvents).omit({ id: true });
 export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });
@@ -143,6 +156,8 @@ export type Indicator = typeof indicators.$inferSelect;
 export type InsertIndicator = z.infer<typeof insertIndicatorSchema>;
 export type ScanRun = typeof scanRuns.$inferSelect;
 export type InsertScanRun = z.infer<typeof insertScanRunSchema>;
+export type ScanProgress = typeof scanProgress.$inferSelect;
+export type InsertScanProgress = z.infer<typeof insertScanProgressSchema>;
 export type Signal = typeof signals.$inferSelect;
 export type InsertSignal = z.infer<typeof insertSignalSchema>;
 export type AlertEvent = typeof alertEvents.$inferSelect;
@@ -167,7 +182,7 @@ export function canonicalToVendor(canonical: string, assetClass: string): string
   const base = canonical.slice(0, 3);
   const quote = canonical.slice(3);
   const pair = `${base}/${quote}`;
-  if (assetClass === "CRYPTO") return `${pair}:Huobi`;
+  if (assetClass === "CRYPTO") return `${pair}:KuCoin`;
   return pair;
 }
 

@@ -1,14 +1,30 @@
 import { db } from "./db";
-import { eq, and, desc, sql, inArray } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import {
-  instruments, candles, indicators, scanRuns, signals, alertEvents, settings,
-  type Instrument, type InsertInstrument,
-  type Candle, type InsertCandle,
-  type Indicator, type InsertIndicator,
-  type ScanRun, type InsertScanRun,
-  type Signal, type InsertSignal,
-  type AlertEvent, type InsertAlertEvent,
-  type Settings, type InsertSettings,
+  instruments,
+  candles,
+  indicators,
+  scanRuns,
+  scanProgress,
+  signals,
+  alertEvents,
+  settings,
+  type Instrument,
+  type InsertInstrument,
+  type Candle,
+  type InsertCandle,
+  type Indicator,
+  type InsertIndicator,
+  type ScanRun,
+  type InsertScanRun,
+  type ScanProgress,
+  type InsertScanProgress,
+  type Signal,
+  type InsertSignal,
+  type AlertEvent,
+  type InsertAlertEvent,
+  type Settings,
+  type InsertSettings,
   type SignalWithInstrument,
 } from "@shared/schema";
 
@@ -28,6 +44,9 @@ export interface IStorage {
   getScanRuns(limit?: number): Promise<ScanRun[]>;
   createScanRun(data: InsertScanRun): Promise<ScanRun>;
   updateScanRun(id: number, data: Partial<ScanRun>): Promise<void>;
+
+  getScanProgress(instrumentId: number, timeframe: string): Promise<ScanProgress | undefined>;
+  upsertScanProgress(data: InsertScanProgress): Promise<void>;
 
   getSignals(filters?: { strategy?: string; direction?: string; status?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]>;
   upsertSignal(data: InsertSignal): Promise<Signal>;
@@ -160,6 +179,28 @@ export class DatabaseStorage implements IStorage {
     await db.update(scanRuns).set(data).where(eq(scanRuns.id, id));
   }
 
+  async getScanProgress(instrumentId: number, timeframe: string): Promise<ScanProgress | undefined> {
+    const [row] = await db
+      .select()
+      .from(scanProgress)
+      .where(and(eq(scanProgress.instrumentId, instrumentId), eq(scanProgress.timeframe, timeframe)))
+      .limit(1);
+    return row;
+  }
+
+  async upsertScanProgress(data: InsertScanProgress): Promise<void> {
+    await db
+      .insert(scanProgress)
+      .values(data)
+      .onConflictDoUpdate({
+        target: [scanProgress.instrumentId, scanProgress.timeframe],
+        set: {
+          lastProcessedBarUtc: data.lastProcessedBarUtc,
+          updatedAt: new Date(),
+        },
+      });
+  }
+
   async getSignals(filters?: { strategy?: string; direction?: string; status?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]> {
     const conditions = [];
     if (filters?.strategy) conditions.push(eq(signals.strategy, filters.strategy));
@@ -226,9 +267,7 @@ export class DatabaseStorage implements IStorage {
     const allInst = await db.select().from(instruments);
     const enabledInst = allInst.filter((i) => i.enabled);
 
-    const [sigCount] = await db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(signals);
+    const [sigCount] = await db.select({ count: sql<number>`count(*)::int` }).from(signals);
     const [newSigCount] = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(signals)

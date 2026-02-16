@@ -1,9 +1,51 @@
 import nodemailer from "nodemailer";
 import { storage } from "./storage";
-import { log } from "./index";
+import { log } from "./logger";
 import type { Signal, Instrument, Settings } from "@shared/schema";
 
 let transporter: nodemailer.Transporter | null = null;
+
+export function safeString(value: unknown, max = 300): string {
+  return String(value ?? "")
+    .replace(/[\r\n]+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+export function formatAlertEmail(
+  signal: Signal,
+  instrument: Instrument,
+  reasonJson: Record<string, any>
+): { subject: string; body: string } {
+  const subject = safeString(
+    `[Signal] ${signal.direction} ${instrument.canonicalSymbol} - ${signal.strategy} (Score: ${signal.score})`,
+    500
+  );
+
+  const reasons = Object.entries(reasonJson)
+    .map(([k, v]) => `  - ${safeString(k, 60)}: ${safeString(v, 300)}`)
+    .join("\n");
+
+  const body = `
+Trading Signal Detected
+=======================
+
+Symbol: ${safeString(instrument.canonicalSymbol, 40)} (${safeString(instrument.vendorSymbol, 60)})
+Direction: ${safeString(signal.direction, 10)}
+Strategy: ${safeString(signal.strategy, 60)}
+Timeframe: ${safeString(signal.timeframe, 10)}
+Score: ${signal.score}/100
+Detected: ${new Date(signal.detectedAt).toUTCString()}
+
+Reasoning:
+${reasons}
+
+---
+Trading Intelligence Engine
+  `.trim();
+
+  return { subject, body };
+}
 
 function getTransporter(): nodemailer.Transporter | null {
   if (transporter) return transporter;
@@ -42,29 +84,7 @@ export async function sendSignalAlert(
     return;
   }
 
-  const subject = `[Signal] ${signal.direction} ${instrument.canonicalSymbol} - ${signal.strategy} (Score: ${signal.score})`;
-
-  const reasons = Object.entries(reasonJson)
-    .map(([k, v]) => `  - ${k}: ${v}`)
-    .join("\n");
-
-  const body = `
-Trading Signal Detected
-=======================
-
-Symbol: ${instrument.canonicalSymbol} (${instrument.vendorSymbol})
-Direction: ${signal.direction}
-Strategy: ${signal.strategy}
-Timeframe: ${signal.timeframe}
-Score: ${signal.score}/100
-Detected: ${new Date(signal.detectedAt).toUTCString()}
-
-Reasoning:
-${reasons}
-
----
-Trading Intelligence Engine
-  `.trim();
+  const { subject, body } = formatAlertEmail(signal, instrument, reasonJson);
 
   try {
     await mailer.sendMail({
