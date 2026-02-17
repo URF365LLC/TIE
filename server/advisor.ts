@@ -17,8 +17,14 @@ export async function analyzePortfolio(): Promise<string> {
     return "No completed signals to analyze yet. Run scans and let signals resolve (win/loss/missed) to build your dataset.";
   }
 
+  const signalIds = archivedSignals.map((s) => s.id);
+  const storedAnalyses = await storage.getTradeAnalyses(signalIds);
+  const analysisMap = new Map(storedAnalyses.map((a) => [a.signalId, a]));
+  const analyzedCount = storedAnalyses.length;
+
   const signalSummaries = archivedSignals.map((s) => {
     const r = (s.reasonJson ?? {}) as Record<string, any>;
+    const a = analysisMap.get(s.id);
     return {
       symbol: s.instrument.canonicalSymbol,
       assetClass: s.instrument.assetClass,
@@ -26,14 +32,11 @@ export async function analyzePortfolio(): Promise<string> {
       direction: s.direction,
       timeframe: s.timeframe,
       score: s.score,
-      status: s.status,
       outcome: s.outcome,
-      outcomePrice: s.outcomePrice,
       detectedAt: s.detectedAt,
       entryPrice: r.entryPrice,
       stopLoss: r.stopLoss,
       takeProfit: r.takeProfit,
-      stopDistance: r.stopDistance,
       riskRewardRatio: r.riskRewardRatio,
       atr: r.atr,
       adx: r.adx,
@@ -43,59 +46,130 @@ export async function analyzePortfolio(): Promise<string> {
       pullback: r.pullback,
       macd: r.macd,
       breakout: r.breakout,
-      ema21Zone: r.ema21Zone,
-      ema55Zone: r.ema55Zone,
-      rangeHigh: r.rangeHigh,
-      rangeLow: r.rangeLow,
+      ...(a ? {
+        deepDiveVerified: true,
+        entryQuality: a.entryQuality,
+        keyFindings: a.keyFindings,
+        winLossFactors: a.winLossFactors,
+        priceActionPatterns: a.priceActionPatterns,
+        chartPatterns: a.chartPatterns,
+        lessonsLearned: a.lessonsLearned,
+        marketPsychology: a.marketPsychology,
+      } : { deepDiveVerified: false }),
     };
   });
 
-  const prompt = `You are an expert quantitative trading analyst and technical advisor. You are analyzing a dataset of ${archivedSignals.length} completed trading signals from an automated scanner.
+  const byPair: Record<string, { wins: number; losses: number; missed: number }> = {};
+  const byAssetClass: Record<string, { wins: number; losses: number }> = {};
+  const byHour: Record<number, { wins: number; losses: number; total: number }> = {};
+  const byStrategy: Record<string, { wins: number; losses: number }> = {};
+
+  for (const s of archivedSignals) {
+    const sym = s.instrument.canonicalSymbol;
+    const ac = s.instrument.assetClass;
+    const hour = new Date(s.detectedAt).getUTCHours();
+
+    if (!byPair[sym]) byPair[sym] = { wins: 0, losses: 0, missed: 0 };
+    if (!byAssetClass[ac]) byAssetClass[ac] = { wins: 0, losses: 0 };
+    if (!byHour[hour]) byHour[hour] = { wins: 0, losses: 0, total: 0 };
+    if (!byStrategy[s.strategy]) byStrategy[s.strategy] = { wins: 0, losses: 0 };
+
+    byHour[hour].total++;
+    if (s.outcome === "WIN") { byPair[sym].wins++; byAssetClass[ac].wins++; byHour[hour].wins++; byStrategy[s.strategy].wins++; }
+    if (s.outcome === "LOSS") { byPair[sym].losses++; byAssetClass[ac].losses++; byHour[hour].losses++; byStrategy[s.strategy].losses++; }
+    if (s.outcome === "MISSED") { byPair[sym].missed++; }
+  }
+
+  const topPairs = Object.entries(byPair)
+    .map(([sym, d]) => ({ symbol: sym, ...d, total: d.wins + d.losses, winRate: d.wins + d.losses > 0 ? ((d.wins / (d.wins + d.losses)) * 100).toFixed(1) + "%" : "N/A" }))
+    .sort((a, b) => b.total - a.total);
+
+  const hourlyPerformance = Object.entries(byHour)
+    .map(([h, d]) => ({ hourUTC: parseInt(h), ...d, winRate: d.wins + d.losses > 0 ? ((d.wins / (d.wins + d.losses)) * 100).toFixed(1) + "%" : "N/A" }))
+    .sort((a, b) => a.hourUTC - b.hourUTC);
+
+  const signalLookup = new Map(archivedSignals.map((s) => [s.id, s]));
+  const deepDiveInsights = analyzedCount > 0 ? storedAnalyses.map((a) => {
+    const sig = signalLookup.get(a.signalId);
+    return {
+      symbol: sig?.instrument.canonicalSymbol || "?",
+      strategy: sig?.strategy || "?",
+      direction: sig?.direction || "?",
+      outcome: sig?.outcome || "?",
+      entryQuality: a.entryQuality,
+      keyFindings: a.keyFindings,
+      winLossFactors: a.winLossFactors,
+      priceActionPatterns: a.priceActionPatterns,
+      chartPatterns: a.chartPatterns,
+      lessonsLearned: a.lessonsLearned,
+      marketPsychology: a.marketPsychology,
+    };
+  }) : [];
+
+  const prompt = `You are an expert quantitative trading analyst producing a comprehensive portfolio intelligence report. This is the "quarterly review" of a trader's automated scanning system.
+
+DATA QUALITY: ${analyzedCount} of ${archivedSignals.length} signals have been individually deep-dive analyzed with 1-minute candle data. ${analyzedCount > 0 ? "Findings marked 'deepDiveVerified: true' are fact-checked. Prioritize these." : "No deep-dive analyses yet — all insights are based on raw signal parameters only."}
 
 OVERALL STATS:
 - Total resolved signals: ${stats.total}
 - Wins: ${stats.wins}, Losses: ${stats.losses}, Missed: ${stats.missed}
 - Overall win rate: ${stats.total > 0 ? ((stats.wins / stats.total) * 100).toFixed(1) : 0}%
 - Taken trades win rate: ${stats.takenTotal > 0 ? ((stats.takenWins / stats.takenTotal) * 100).toFixed(1) : "N/A"}% (${stats.takenTotal} trades taken)
-- By Strategy: ${JSON.stringify(stats.byStrategy)}
-- By Direction: ${JSON.stringify(stats.byDirection)}
 
-SIGNAL DATA (last ${archivedSignals.length} signals):
+PRE-COMPUTED BREAKDOWNS:
+- By Pair: ${JSON.stringify(topPairs.slice(0, 20))}
+- By Asset Class: ${JSON.stringify(byAssetClass)}
+- By Strategy: ${JSON.stringify(byStrategy)}
+- By Hour (UTC): ${JSON.stringify(hourlyPerformance)}
+
+SIGNAL DATA (${archivedSignals.length} signals, ${analyzedCount} with deep-dive findings):
 ${JSON.stringify(signalSummaries, null, 1)}
+${analyzedCount > 0 ? `
+DEEP-DIVE VERIFIED INSIGHTS (${analyzedCount} trades with 1-minute candle analysis):
+${JSON.stringify(deepDiveInsights, null, 1)}
 
-Provide a comprehensive portfolio intelligence analysis. Structure your response with these sections:
+These deep-dive findings are FACT-CHECKED from minute-by-minute price action review. Use them to validate or challenge patterns found in the raw data.
+` : ""}
+Provide a comprehensive portfolio intelligence analysis. This is the trader's "quarterly performance review." Structure your response:
 
 ## Performance Overview
-Summarize overall performance, win rates, and the effectiveness of the scanning system.
+Overall system effectiveness. Is this scanner generating edge? Win rate trends, strategy comparison. Reference actual numbers.
 
-## Strategy Analysis
-Break down each strategy (TREND_CONTINUATION, RANGE_BREAKOUT). Which performs better? Under what conditions? What score thresholds correlate with higher win rates?
+## Cross-Strategy Comparison
+Compare TREND_CONTINUATION vs RANGE_BREAKOUT head-to-head. Which generates more edge? Under what market conditions does each excel? Are they complementary or redundant?
 
-## Best & Worst Performers
-Which symbols/pairs win most often? Which lose? Is there an asset class (FOREX/METAL/CRYPTO) that outperforms?
+## Pair & Asset Class Rankings
+Rank pairs by profitability. Which pairs are your edge? Which are bleeding money? Is there an asset class (FOREX/METAL/CRYPTO) that consistently outperforms?${analyzedCount > 0 ? " Cross-reference with deep-dive findings — do the entry quality ratings align with win rates?" : ""}
+
+## Session & Timing Analysis
+What hours (UTC) produce the best results? Map to trading sessions (London, NY, Asian overlap). Are there dead zones to avoid?
 
 ## Pattern Recognition
-Identify correlations between wins and specific technical factors:
-- ADX ranges that produce more wins
-- EMA stack configurations in winners vs losers
-- Pullback quality patterns
-- MACD alignment patterns
-- Bollinger Band width thresholds
-- Risk:reward ratios that actually paid off
+Identify cross-strategy correlations:
+- ADX sweet spots that produce wins across both strategies
+- Score thresholds where win rate meaningfully jumps
+- R:R ratios that actually paid off vs those that didn't
+- Direction bias — is LONG or SHORT consistently stronger?
+${analyzedCount > 0 ? "- Entry quality patterns from deep dives — what separates EXCELLENT entries from POOR ones?" : ""}
+${analyzedCount > 0 ? "- Common chart patterns from deep dives — which formations win most?" : ""}
 
-## Timing Analysis
-Are there time-of-day or session patterns? Do signals detected at certain hours perform better?
+## Your Edge Profile
+Define exactly where this system's edge lives. What is the "ideal trade" across all strategies? What are the specific conditions (pair + strategy + direction + score + ADX range + session) that produce the highest probability?
 
-## Score Threshold Analysis
-At what score level do win rates meaningfully improve? Should the minimum alert score be adjusted?
-
-## Actionable Recommendations
-Specific, data-driven recommendations to improve win rate and trading edge. Be concrete and reference the actual numbers.
+## Performance Trends
+Is the system improving or degrading over time? Are recent signals performing differently than earlier ones?
 
 ## Winner's Playbook
-Based on the winning signals, define the exact conditions that produce the most reliable setups. This is the checklist the trader should look for when screening charts manually.
-
-Be direct, technical, and data-driven. Reference actual numbers from the dataset. Don't give generic trading advice — everything must be grounded in this specific data.`;
+The definitive checklist for manually screening charts based on everything above. What to look for, what to avoid, when to trade, when to sit out.
+${analyzedCount > 0 ? `
+## Deep-Dive Intelligence
+Insights that ONLY come from the ${analyzedCount} verified trade analyses:
+- Most common market psychology patterns observed
+- Recurring price action setups
+- Smart money behavior patterns
+- Entry timing refinements based on 1-minute data
+` : ""}
+CRITICAL: Be direct and data-driven. Reference actual numbers, pairs, and outcomes. ${analyzedCount > 0 ? "Ground insights in verified deep-dive findings wherever possible." : "Flag that deep-dive analysis would strengthen these conclusions."}`;
 
   const response = await openai.chat.completions.create({
     model: "gpt-5.2",
@@ -488,6 +562,7 @@ export async function generateStrategyOptimizer(): Promise<string> {
         direction: sig.direction,
         score: sig.score,
         outcome: sig.outcome,
+        detectedAt: sig.detectedAt,
         adx: r.adx, bbWidth: r.bbWidth, emaStack: r.emaStack, pullback: r.pullback,
         macd: r.macd, bias: r.bias, breakout: r.breakout, riskRewardRatio: r.riskRewardRatio,
         atr: r.atr, stopDistance: r.stopDistance,
@@ -497,71 +572,205 @@ export async function generateStrategyOptimizer(): Promise<string> {
         priceActionPatterns: a.priceActionPatterns,
         chartPatterns: a.chartPatterns,
         lessonsLearned: a.lessonsLearned,
+        marketPsychology: a.marketPsychology,
       };
     });
 
-  const prompt = `You are an expert quantitative trading systems developer and strategy optimizer. You have access to ${analyzedTrades.length} trades that have been individually deep-dive analyzed with 1-minute candle data. Your job is to recommend specific, actionable improvements to the trading strategies.
+  // === LAYER 1: Portfolio Intelligence data (cross-strategy, cross-pair, session patterns) ===
+  const byPair: Record<string, { wins: number; losses: number; total: number }> = {};
+  const byAssetClass: Record<string, { wins: number; losses: number }> = {};
+  const byHour: Record<number, { wins: number; losses: number; total: number }> = {};
+  const byStrategyDir: Record<string, { wins: number; losses: number }> = {};
+  const scoreRanges: Record<string, { wins: number; losses: number }> = { "0-39": { wins: 0, losses: 0 }, "40-59": { wins: 0, losses: 0 }, "60-79": { wins: 0, losses: 0 }, "80-100": { wins: 0, losses: 0 } };
 
-CURRENT STRATEGY IMPLEMENTATIONS:
-1. TREND_CONTINUATION: Requires ADX >= 18, EMA stack alignment (9 > 21 > 55 for LONG), pullback to EMA21/EMA55 zone, MACD histogram confirmation, 1h bias via EMA200 slope.
-2. RANGE_BREAKOUT: Requires ADX <= 18, narrow Bollinger Band width, price breaking above/below recent range with BB band confirmation.
+  for (const s of archivedSignals) {
+    const sym = s.instrument.canonicalSymbol;
+    const ac = s.instrument.assetClass;
+    const hour = new Date(s.detectedAt).getUTCHours();
+    const stratDir = `${s.strategy}_${s.direction}`;
+    const scoreKey = s.score >= 80 ? "80-100" : s.score >= 60 ? "60-79" : s.score >= 40 ? "40-59" : "0-39";
+
+    if (!byPair[sym]) byPair[sym] = { wins: 0, losses: 0, total: 0 };
+    if (!byAssetClass[ac]) byAssetClass[ac] = { wins: 0, losses: 0 };
+    if (!byHour[hour]) byHour[hour] = { wins: 0, losses: 0, total: 0 };
+    if (!byStrategyDir[stratDir]) byStrategyDir[stratDir] = { wins: 0, losses: 0 };
+
+    byPair[sym].total++;
+    byHour[hour].total++;
+    if (s.outcome === "WIN") { byPair[sym].wins++; byAssetClass[ac].wins++; byHour[hour].wins++; byStrategyDir[stratDir].wins++; scoreRanges[scoreKey].wins++; }
+    if (s.outcome === "LOSS") { byPair[sym].losses++; byAssetClass[ac].losses++; byHour[hour].losses++; byStrategyDir[stratDir].losses++; scoreRanges[scoreKey].losses++; }
+  }
+
+  const pairRankings = Object.entries(byPair)
+    .map(([sym, d]) => ({ symbol: sym, ...d, winRate: d.wins + d.losses > 0 ? ((d.wins / (d.wins + d.losses)) * 100).toFixed(1) + "%" : "N/A" }))
+    .sort((a, b) => b.total - a.total);
+
+  const hourPerf = Object.entries(byHour)
+    .map(([h, d]) => ({ hourUTC: parseInt(h), ...d, winRate: d.wins + d.losses > 0 ? ((d.wins / (d.wins + d.losses)) * 100).toFixed(1) + "%" : "N/A" }))
+    .sort((a, b) => a.hourUTC - b.hourUTC);
+
+  const scorePerf = Object.entries(scoreRanges).map(([range, d]) => ({
+    range, ...d, winRate: d.wins + d.losses > 0 ? ((d.wins / (d.wins + d.losses)) * 100).toFixed(1) + "%" : "N/A"
+  }));
+
+  // === LAYER 2: Per-strategy breakdowns (Strategy Masterclass data) ===
+  const tcTrades = analyzedTrades.filter((t) => t.strategy === "TREND_CONTINUATION");
+  const rbTrades = analyzedTrades.filter((t) => t.strategy === "RANGE_BREAKOUT");
+
+  const buildStrategyProfile = (trades: typeof analyzedTrades, name: string) => {
+    const wins = trades.filter((t) => t.outcome === "WIN");
+    const losses = trades.filter((t) => t.outcome === "LOSS");
+    const winAdxAvg = wins.length > 0 ? (wins.reduce((s, t) => s + (parseFloat(t.adx) || 0), 0) / wins.length).toFixed(1) : "N/A";
+    const lossAdxAvg = losses.length > 0 ? (losses.reduce((s, t) => s + (parseFloat(t.adx) || 0), 0) / losses.length).toFixed(1) : "N/A";
+    const excellentEntries = trades.filter((t) => t.entryQuality === "EXCELLENT" || t.entryQuality === "GOOD");
+    const poorEntries = trades.filter((t) => t.entryQuality === "POOR" || t.entryQuality === "FAIR");
+    const commonWinPatterns = wins.map((t) => t.chartPatterns).filter(Boolean);
+    const commonLossFactors = losses.map((t) => t.winLossFactors).filter(Boolean);
+    const commonLessons = trades.map((t) => t.lessonsLearned).filter(Boolean);
+    return {
+      name,
+      total: trades.length,
+      wins: wins.length,
+      losses: losses.length,
+      winRate: wins.length + losses.length > 0 ? ((wins.length / (wins.length + losses.length)) * 100).toFixed(1) + "%" : "N/A",
+      winAdxAvg, lossAdxAvg,
+      excellentEntryCount: excellentEntries.length,
+      poorEntryCount: poorEntries.length,
+      commonWinPatterns: commonWinPatterns.slice(0, 10),
+      commonLossFactors: commonLossFactors.slice(0, 10),
+      commonLessons: commonLessons.slice(0, 10),
+    };
+  };
+
+  const tcProfile = buildStrategyProfile(tcTrades, "TREND_CONTINUATION");
+  const rbProfile = buildStrategyProfile(rbTrades, "RANGE_BREAKOUT");
+
+  // === LAYER 3: Aggregated deep-dive insights ===
+  const allKeyFindings = analyzedTrades.map((t) => `[${t.symbol} ${t.outcome}] ${t.keyFindings}`).filter((f) => f.length > 20);
+  const allLessons = analyzedTrades.map((t) => `[${t.symbol} ${t.strategy} ${t.outcome}] ${t.lessonsLearned}`).filter((f) => f.length > 20);
+  const allPsychology = analyzedTrades.map((t) => `[${t.symbol} ${t.outcome}] ${t.marketPsychology}`).filter((f) => f.length > 20);
+
+  const prompt = `You are an expert quantitative trading systems architect and strategy optimizer. You are the FINAL LAYER in a 4-tier analysis system. You receive the complete intelligence from three upstream layers and must synthesize it all into concrete, actionable optimization recommendations.
+
+YOUR DATA SOURCES (from upstream analysis layers):
+
+=== LAYER 1: PORTFOLIO INTELLIGENCE (Cross-strategy, cross-pair, session patterns) ===
 
 OVERALL PERFORMANCE:
 - Total resolved: ${stats.total}, Wins: ${stats.wins}, Losses: ${stats.losses}, Missed: ${stats.missed}
 - Win rate: ${stats.total > 0 ? ((stats.wins / stats.total) * 100).toFixed(1) : 0}%
+- Taken trades win rate: ${stats.takenTotal > 0 ? ((stats.takenWins / stats.takenTotal) * 100).toFixed(1) : "N/A"}%
 - By Strategy: ${JSON.stringify(stats.byStrategy)}
 - By Direction: ${JSON.stringify(stats.byDirection)}
+- By Strategy+Direction: ${JSON.stringify(byStrategyDir)}
 
-DEEP-DIVE ANALYZED TRADES (${analyzedTrades.length} trades with verified 1-minute price action analysis):
+PAIR RANKINGS (${pairRankings.length} pairs):
+${JSON.stringify(pairRankings, null, 1)}
+
+ASSET CLASS PERFORMANCE:
+${JSON.stringify(byAssetClass, null, 1)}
+
+SESSION/HOURLY PERFORMANCE (UTC):
+${JSON.stringify(hourPerf, null, 1)}
+
+WIN RATE BY SCORE RANGE:
+${JSON.stringify(scorePerf, null, 1)}
+
+=== LAYER 2: STRATEGY MASTERCLASS (Per-strategy winning formulas & failure patterns) ===
+
+TREND_CONTINUATION PROFILE:
+${JSON.stringify(tcProfile, null, 1)}
+
+RANGE_BREAKOUT PROFILE:
+${JSON.stringify(rbProfile, null, 1)}
+
+=== LAYER 3: TRADE DEEP DIVE (${analyzedTrades.length} individually verified trade analyses) ===
+
+ANALYZED TRADES WITH FINDINGS:
 ${JSON.stringify(analyzedTrades, null, 1)}
 
-Based on the VERIFIED findings from deep-dive analyzed trades, provide strategy optimization recommendations. Structure your response:
+AGGREGATED KEY FINDINGS (across all analyzed trades):
+${allKeyFindings.slice(0, 30).join("\n")}
 
-## Current Performance Assessment
-How are the strategies performing? What's working and what isn't? Be specific with numbers.
+AGGREGATED LESSONS LEARNED:
+${allLessons.slice(0, 30).join("\n")}
+
+AGGREGATED MARKET PSYCHOLOGY OBSERVATIONS:
+${allPsychology.slice(0, 20).join("\n")}
+
+=== CURRENT STRATEGY CODE LOGIC ===
+1. TREND_CONTINUATION: Requires ADX >= 18, EMA stack alignment (EMA9 > EMA21 > EMA55 for LONG, reversed for SHORT), pullback to EMA21/EMA55 zone, MACD histogram confirmation, 1h bias via EMA200 slope direction.
+2. RANGE_BREAKOUT: Requires ADX <= 18, narrow Bollinger Band width (< median width), price breaking above/below recent 20-bar range, BB band confirmation (close above upper BB for LONG, below lower BB for SHORT).
+
+=== YOUR TASK ===
+Synthesize ALL three layers of intelligence into concrete optimization recommendations. You are seeing the FULL picture that no individual tab can see.
+
+## System Health Assessment
+Overall system effectiveness based on all three intelligence layers. Is the scanner generating edge? What's the trajectory?
 
 ## TREND_CONTINUATION Optimizations
 For each recommendation, provide:
 - **Current Setting**: What the strategy currently does
 - **Recommended Change**: The specific parameter or logic change
-- **Evidence**: Which analyzed trades support this recommendation (reference specific symbols, outcomes, and findings)
-- **Expected Impact**: What improvement this should produce
+- **Evidence from Portfolio Intelligence**: Which pairs/sessions/scores support this?
+- **Evidence from Deep-Dive Analyses**: Which specific trade findings validate this? (reference symbol, outcome, and findings)
+- **Evidence from Strategy Profile**: What do the aggregated win/loss patterns show?
+- **Expected Impact**: Quantified improvement estimate
+- **Confidence**: HIGH/MEDIUM/LOW based on evidence strength
 
-Focus areas: ADX threshold, EMA stack requirements, pullback quality filters, MACD confirmation rules, score threshold, pair-specific adjustments.
+Focus: ADX thresholds, EMA requirements, pullback quality, MACD rules, score filters, pair-specific filters, session filters.
 
 ## RANGE_BREAKOUT Optimizations
-Same format as above. Focus areas: ADX ceiling, BB width threshold, breakout confirmation, volume requirements, pair suitability.
+Same format. Focus: ADX ceiling, BB width thresholds, breakout confirmation, pair suitability, session timing.
 
-## Pair-Specific Recommendations
-Which pairs should be:
-- Kept (consistently profitable)
-- Excluded (consistently losing)
-- Monitored (mixed results, need more data)
-Reference the deep-dive findings for each recommendation.
+## Cross-Strategy Insights
+Patterns that span BOTH strategies — things Portfolio Intelligence reveals that single-strategy analysis misses:
+- Pair correlations across strategies
+- Session timing that affects both
+- Score thresholds that apply universally
+- Direction biases across the board
 
-## Score Threshold Analysis
-Should the minimum score for alerts be raised or lowered? What score range produces the highest win rate based on the analyzed trades?
+## Pair Universe Optimization
+Based on ALL layers, for each pair with sufficient data:
+- **KEEP** (consistently profitable across strategies)
+- **EXCLUDE** (consistently losing, deep-dive confirms poor setups)
+- **RESTRICT** (profitable on one strategy but not the other)
+- **MONITOR** (insufficient data)
 
-## Risk Management Improvements
-Based on the analyzed price action, are stops well-placed? Should stop distance calculations change? Is the R:R target appropriate?
+## Session & Timing Rules
+Should the scanner only run during certain hours? Are there dead zones that consistently produce losers?
 
-## Implementation Priority
-Rank the recommendations from highest to lowest impact. Which changes should be made first?
+## Score & Risk Calibration
+- Optimal score threshold based on scoreRange win rates AND deep-dive entry quality ratings
+- Stop placement improvements based on deep-dive price action observations
+- R:R target adjustments based on what the data actually shows
 
-## Code Change Descriptions
-For each recommendation, describe IN PLAIN ENGLISH what the code change would look like. Example: "In the trend continuation evaluation, change the ADX check from >= 18 to >= 22" or "Add a new filter that rejects signals where BB width is above 0.015".
-Do NOT write actual code — describe the changes clearly so a developer can implement them.
+## Market Psychology Integration
+From deep-dive analyses: recurring smart money patterns, liquidity grabs, stop hunts — and how strategy parameters should account for them.
+
+## Implementation Priority (Ranked)
+Rank ALL recommendations from highest to lowest expected impact:
+1. [Highest impact change] - Evidence: ... - Estimated win rate improvement: ...
+2. ...
+
+## Plain-English Code Changes
+For each recommendation, describe the code change clearly:
+- "Change ADX check from >= 18 to >= 22 in trend continuation evaluation"
+- "Add session filter: skip signals detected between 21:00-01:00 UTC"
+- "Exclude GBPJPY from range breakout strategy"
+Do NOT write actual code. Describe changes so a developer can implement them.
 
 CRITICAL RULES:
-1. Every recommendation MUST be grounded in specific findings from the analyzed trades. No generic advice.
-2. Reference specific trade outcomes and findings by symbol and outcome.
-3. If the data is insufficient to support a recommendation, say so explicitly rather than guessing.
-4. These are RECOMMENDATIONS ONLY — they will NOT be automatically applied. The trader reviews and decides.`;
+1. Every recommendation MUST cite evidence from at least 2 of the 3 layers. Cross-referenced findings are stronger.
+2. Flag any recommendation where only 1 layer supports it — mark confidence as LOW.
+3. If data is insufficient for a recommendation, say so explicitly.
+4. These are RECOMMENDATIONS ONLY — nothing is auto-applied. The trader reviews and decides.
+5. Quantify expected impact where possible (e.g., "based on the data, this would have prevented 3 of the 5 losses in the dataset").`;
 
   const response = await openai.chat.completions.create({
     model: "gpt-5.2",
     messages: [{ role: "user", content: prompt }],
-    max_completion_tokens: 8192,
+    max_completion_tokens: 12000,
   });
 
   return response.choices[0]?.message?.content || "Optimizer recommendations could not be generated.";

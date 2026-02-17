@@ -71,6 +71,11 @@ export default function AdvisorPage() {
 function PortfolioTab() {
   const [analysis, setAnalysis] = useState<string | null>(null);
 
+  const { data: analyzedData } = useQuery<{ analyzedIds: number[] }>({
+    queryKey: ["/api/advisor/analyzed-signals"],
+  });
+  const analyzedCount = analyzedData?.analyzedIds?.length || 0;
+
   const mutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/advisor/portfolio-analysis");
@@ -87,7 +92,7 @@ function PortfolioTab() {
             <div>
               <CardTitle className="text-base font-medium">Portfolio Intelligence</CardTitle>
               <CardDescription className="text-xs">
-                Analyzes all your completed signals to find patterns, win correlations, score thresholds, and actionable insights
+                Your quarterly performance review — cross-strategy, cross-pair, and session analysis to identify where your edge lives
               </CardDescription>
             </div>
             <Button
@@ -102,6 +107,12 @@ function PortfolioTab() {
               )}
             </Button>
           </div>
+          {analyzedCount > 0 && (
+            <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+              {analyzedCount} deep-dive analyzed trades will strengthen this analysis
+            </div>
+          )}
         </CardHeader>
         <CardContent>
           {mutation.isPending && (
@@ -109,8 +120,12 @@ function PortfolioTab() {
               <div className="flex items-center gap-3 p-4 rounded-md bg-muted/50">
                 <Loader2 className="w-5 h-5 animate-spin text-violet-500" />
                 <div>
-                  <p className="text-sm font-medium">Analyzing your trading data...</p>
-                  <p className="text-xs text-muted-foreground">The AI is studying your signals, outcomes, and patterns. This may take 15-30 seconds.</p>
+                  <p className="text-sm font-medium">Building your portfolio intelligence report...</p>
+                  <p className="text-xs text-muted-foreground">
+                    {analyzedCount > 0
+                      ? `Cross-referencing ${analyzedCount} verified deep-dive analyses with all signal data. This may take 20-40 seconds.`
+                      : "Analyzing your signals, outcomes, and patterns. This may take 15-30 seconds."}
+                  </p>
                 </div>
               </div>
               {[1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-20 w-full" />)}
@@ -130,7 +145,7 @@ function PortfolioTab() {
             <div className="flex flex-col items-center justify-center py-12 text-center">
               <BarChart3 className="w-10 h-10 text-muted-foreground mb-3" />
               <p className="text-sm text-muted-foreground mb-1">No analysis generated yet</p>
-              <p className="text-xs text-muted-foreground">Click "Run Analysis" to have the AI study your backtest data and find winning patterns</p>
+              <p className="text-xs text-muted-foreground">Click "Run Analysis" for a comprehensive portfolio review across all strategies, pairs, and sessions</p>
             </div>
           )}
         </CardContent>
@@ -493,7 +508,7 @@ function StrategyOptimizerTab() {
             <div>
               <CardTitle className="text-base font-medium">Strategy Optimizer</CardTitle>
               <CardDescription className="text-xs">
-                Concrete parameter recommendations and code improvement suggestions based on your analyzed trades. Advisory only \u2014 nothing is auto-applied.
+                Synthesizes all intelligence layers: Trade Deep Dives + Portfolio patterns + Strategy profiles into concrete action items. Advisory only.
               </CardDescription>
             </div>
             <Button
@@ -514,9 +529,20 @@ function StrategyOptimizerTab() {
             </div>
           )}
           {analyzedCount >= 3 && (
-            <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-              {analyzedCount} trades analyzed \u2014 recommendations will be grounded in verified data
+            <div className="mt-2 space-y-1.5">
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                {analyzedCount} deep-dive analyses feeding this optimizer
+              </div>
+              <div className="flex items-center gap-3 text-[10px] text-muted-foreground flex-wrap">
+                <span className="flex items-center gap-1"><Search className="w-3 h-3" /> Trade Deep Dive</span>
+                <span className="text-muted-foreground/50">+</span>
+                <span className="flex items-center gap-1"><BarChart3 className="w-3 h-3" /> Portfolio Intelligence</span>
+                <span className="text-muted-foreground/50">+</span>
+                <span className="flex items-center gap-1"><BookOpen className="w-3 h-3" /> Strategy Profiles</span>
+                <span className="text-muted-foreground/50">=</span>
+                <span className="flex items-center gap-1 font-medium"><Settings2 className="w-3 h-3" /> Optimizer</span>
+              </div>
             </div>
           )}
         </CardHeader>
@@ -526,8 +552,8 @@ function StrategyOptimizerTab() {
               <div className="flex items-center gap-3 p-4 rounded-md bg-muted/50">
                 <Loader2 className="w-5 h-5 animate-spin text-violet-500" />
                 <div>
-                  <p className="text-sm font-medium">Generating optimization recommendations...</p>
-                  <p className="text-xs text-muted-foreground">The AI is aggregating findings from {analyzedCount} deep-dive analyses to identify concrete strategy improvements. This may take 30-60 seconds.</p>
+                  <p className="text-sm font-medium">Synthesizing all intelligence layers...</p>
+                  <p className="text-xs text-muted-foreground">Gathering {analyzedCount} deep-dive analyses, cross-pair/session patterns, and per-strategy profiles. Building comprehensive recommendations. This may take 30-60 seconds.</p>
                 </div>
               </div>
               {[1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-16 w-full" />)}
