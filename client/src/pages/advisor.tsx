@@ -6,8 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Brain, TrendingUp, TrendingDown, Target, BookOpen, Loader2, Sparkles, BarChart3, Search, ChevronDown, ChevronUp } from "lucide-react";
-import { apiRequest } from "@/lib/queryClient";
+import { Brain, TrendingUp, TrendingDown, Target, BookOpen, Loader2, Sparkles, BarChart3, Search, ChevronDown, ChevronUp, CheckCircle2, Zap, Settings2 } from "lucide-react";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import ReactMarkdown from "react-markdown";
 import type { SignalWithInstrument } from "@shared/schema";
 
@@ -28,7 +28,7 @@ export default function AdvisorPage() {
         </div>
 
         <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <TabsList className="w-full justify-start">
+          <TabsList className="w-full justify-start gap-1">
             <TabsTrigger value="portfolio" data-testid="tab-portfolio" className="gap-1.5">
               <BarChart3 className="w-3.5 h-3.5" />
               Portfolio Intelligence
@@ -40,6 +40,10 @@ export default function AdvisorPage() {
             <TabsTrigger value="strategy" data-testid="tab-strategy" className="gap-1.5">
               <BookOpen className="w-3.5 h-3.5" />
               Strategy Masterclass
+            </TabsTrigger>
+            <TabsTrigger value="optimizer" data-testid="tab-optimizer" className="gap-1.5">
+              <Settings2 className="w-3.5 h-3.5" />
+              Strategy Optimizer
             </TabsTrigger>
           </TabsList>
 
@@ -53,6 +57,10 @@ export default function AdvisorPage() {
 
           <TabsContent value="strategy" className="mt-4">
             <StrategyMasterclassTab />
+          </TabsContent>
+
+          <TabsContent value="optimizer" className="mt-4">
+            <StrategyOptimizerTab />
           </TabsContent>
         </Tabs>
       </div>
@@ -137,8 +145,17 @@ function TradeDeepDiveTab() {
   const [expandedPicker, setExpandedPicker] = useState(true);
 
   const { data: signals, isLoading: signalsLoading } = useQuery<SignalWithInstrument[]>({
-    queryKey: ["/api/backtest/signals", "?limit=100"],
+    queryKey: ["/api/backtest/signals", { limit: 100 }],
+    queryFn: async () => {
+      const res = await fetch("/api/backtest/signals?limit=100");
+      return res.json();
+    },
   });
+
+  const { data: analyzedData } = useQuery<{ analyzedIds: number[] }>({
+    queryKey: ["/api/advisor/analyzed-signals"],
+  });
+  const analyzedIds = new Set(analyzedData?.analyzedIds || []);
 
   const mutation = useMutation({
     mutationFn: async (signalId: number) => {
@@ -148,6 +165,20 @@ function TradeDeepDiveTab() {
     onSuccess: (data) => {
       setAnalysis(data.analysis);
       setExpandedPicker(false);
+      queryClient.invalidateQueries({ queryKey: ["/api/advisor/analyzed-signals"] });
+    },
+  });
+
+  const unanalyzedSignals = signals?.filter((s) => !analyzedIds.has(s.id)) || [];
+
+  const batchMutation = useMutation({
+    mutationFn: async (signalIds: number[]) => {
+      const res = await apiRequest("POST", "/api/advisor/batch-analyze", { signalIds });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/advisor/analyzed-signals"] });
+      setAnalysis(`Batch analysis complete: ${data.completed} analyzed successfully, ${data.failed} failed.`);
     },
   });
 
@@ -156,6 +187,29 @@ function TradeDeepDiveTab() {
     setAnalysis(null);
     mutation.mutate(id);
   };
+
+  const handleBatchAnalyze = () => {
+    const toAnalyze = unanalyzedSignals.slice(0, 20).map((s) => s.id);
+    if (toAnalyze.length > 0) {
+      setSelectedSignalId(null);
+      setAnalysis(null);
+      batchMutation.mutate(toAnalyze);
+    }
+  };
+
+  const handleViewStored = async (id: number) => {
+    setSelectedSignalId(id);
+    try {
+      const res = await fetch(`/api/advisor/trade-analysis/${id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setAnalysis(data.analysis);
+        setExpandedPicker(false);
+      }
+    } catch {}
+  };
+
+  const isPending = mutation.isPending || batchMutation.isPending;
 
   return (
     <div className="space-y-4">
@@ -168,7 +222,7 @@ function TradeDeepDiveTab() {
             <div>
               <CardTitle className="text-base font-medium">Select a Trade to Analyze</CardTitle>
               <CardDescription className="text-xs">
-                Pick any completed signal for a minute-by-minute expert breakdown
+                Pick any completed signal for a minute-by-minute expert breakdown, or batch analyze multiple
               </CardDescription>
             </div>
             {expandedPicker ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
@@ -176,6 +230,29 @@ function TradeDeepDiveTab() {
         </CardHeader>
         {expandedPicker && (
           <CardContent>
+            {signals && signals.length > 0 && (
+              <div className="flex items-center justify-between gap-2 mb-3 pb-3 border-b flex-wrap">
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                  <span>{analyzedIds.size} of {signals.length} signals analyzed</span>
+                </div>
+                {unanalyzedSignals.length > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={(e) => { e.stopPropagation(); handleBatchAnalyze(); }}
+                    disabled={isPending}
+                    data-testid="button-batch-analyze"
+                  >
+                    {batchMutation.isPending ? (
+                      <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Batch Analyzing...</>
+                    ) : (
+                      <><Zap className="w-3.5 h-3.5 mr-1.5" /> Analyze {Math.min(unanalyzedSignals.length, 20)} Unanalyzed</>
+                    )}
+                  </Button>
+                )}
+              </div>
+            )}
             {signalsLoading ? (
               <div className="space-y-2">
                 {[1, 2, 3].map((i) => <Skeleton key={i} className="h-12 w-full" />)}
@@ -187,15 +264,16 @@ function TradeDeepDiveTab() {
                 <p className="text-xs text-muted-foreground mt-1">Signals need to resolve (win/loss/missed) before deep dive analysis</p>
               </div>
             ) : (
-              <div className="space-y-1 max-h-72 overflow-y-auto">
+              <div className="space-y-1 max-h-80 overflow-y-auto">
                 {signals.map((sig) => {
                   const reason = (sig.reasonJson ?? {}) as Record<string, any>;
                   const isSelected = selectedSignalId === sig.id;
+                  const isAnalyzed = analyzedIds.has(sig.id);
                   return (
                     <div
                       key={sig.id}
                       className={`flex items-center justify-between p-3 rounded-md cursor-pointer border ${isSelected ? "border-violet-500 bg-violet-500/5" : "border-transparent hover-elevate"}`}
-                      onClick={() => handleAnalyze(sig.id)}
+                      onClick={() => isAnalyzed ? handleViewStored(sig.id) : handleAnalyze(sig.id)}
                       data-testid={`signal-pick-${sig.id}`}
                     >
                       <div className="flex items-center gap-3 min-w-0">
@@ -206,7 +284,12 @@ function TradeDeepDiveTab() {
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-sm font-semibold">{sig.instrument.canonicalSymbol}</span>
                             <Badge variant="secondary" className="text-[10px]">{sig.strategy.replace(/_/g, " ")}</Badge>
-                            <OutcomeBadge outcome={sig.outcome || "—"} />
+                            <OutcomeBadge outcome={sig.outcome || "\u2014"} />
+                            {isAnalyzed && (
+                              <span className="inline-flex items-center gap-0.5 text-[10px] text-emerald-500">
+                                <CheckCircle2 className="w-3 h-3" /> Analyzed
+                              </span>
+                            )}
                           </div>
                           <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground flex-wrap">
                             <span>{sig.timeframe}</span>
@@ -228,6 +311,21 @@ function TradeDeepDiveTab() {
         )}
       </Card>
 
+      {batchMutation.isPending && (
+        <Card>
+          <CardContent className="p-6">
+            <div className="flex items-center gap-3 p-4 rounded-md bg-muted/50 mb-4">
+              <Loader2 className="w-5 h-5 animate-spin text-violet-500" />
+              <div>
+                <p className="text-sm font-medium">Batch analyzing trades...</p>
+                <p className="text-xs text-muted-foreground">Processing up to {Math.min(unanalyzedSignals.length, 20)} signals sequentially. Each signal fetches 1-minute candles and runs AI analysis. This may take several minutes.</p>
+              </div>
+            </div>
+            {[1, 2, 3].map((i) => <Skeleton key={i} className="h-16 w-full mb-3" />)}
+          </CardContent>
+        </Card>
+      )}
+
       {mutation.isPending && (
         <Card>
           <CardContent className="p-6">
@@ -243,17 +341,17 @@ function TradeDeepDiveTab() {
         </Card>
       )}
 
-      {mutation.isError && (
+      {(mutation.isError || batchMutation.isError) && (
         <Card>
           <CardContent className="p-6">
             <div className="p-4 rounded-md bg-red-500/10 text-red-500 text-sm" data-testid="text-trade-error">
-              Failed to generate trade analysis. {(mutation.error as Error)?.message || "Please try again."}
+              Failed to generate trade analysis. {((mutation.error || batchMutation.error) as Error)?.message || "Please try again."}
             </div>
           </CardContent>
         </Card>
       )}
 
-      {analysis && !mutation.isPending && (
+      {analysis && !isPending && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base font-medium flex items-center gap-2">
@@ -276,6 +374,11 @@ function StrategyMasterclassTab() {
   const [selectedStrategy, setSelectedStrategy] = useState<string>("TREND_CONTINUATION");
   const [analysis, setAnalysis] = useState<string | null>(null);
 
+  const { data: analyzedData } = useQuery<{ analyzedIds: number[] }>({
+    queryKey: ["/api/advisor/analyzed-signals"],
+  });
+  const analyzedCount = analyzedData?.analyzedIds?.length || 0;
+
   const mutation = useMutation({
     mutationFn: async (strategy: string) => {
       const res = await apiRequest("POST", "/api/advisor/strategy-guide", { strategy });
@@ -297,7 +400,9 @@ function StrategyMasterclassTab() {
             <div>
               <CardTitle className="text-base font-medium">Strategy Masterclass</CardTitle>
               <CardDescription className="text-xs">
-                In-depth breakdown of each strategy's performance, winning formula, failure patterns, and chart identification guide
+                {analyzedCount > 0
+                  ? `Grounded in ${analyzedCount} deep-dive analyzed trades with verified 1-minute price action data`
+                  : "Run Trade Deep Dive on signals first for fact-checked insights (currently using raw signal data only)"}
               </CardDescription>
             </div>
             <div className="flex items-center gap-2">
@@ -331,7 +436,11 @@ function StrategyMasterclassTab() {
                 <Loader2 className="w-5 h-5 animate-spin text-violet-500" />
                 <div>
                   <p className="text-sm font-medium">Generating strategy masterclass...</p>
-                  <p className="text-xs text-muted-foreground">The AI is analyzing winning vs losing conditions, building your visual checklist, and creating improvement recommendations. This may take 20-40 seconds.</p>
+                  <p className="text-xs text-muted-foreground">
+                    {analyzedCount > 0
+                      ? `Building guide from ${analyzedCount} fact-checked trade analyses. This may take 20-40 seconds.`
+                      : "Analyzing raw signal data. For better results, run Trade Deep Dive first."}
+                  </p>
                 </div>
               </div>
               {[1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-16 w-full" />)}
@@ -352,6 +461,99 @@ function StrategyMasterclassTab() {
               <BookOpen className="w-10 h-10 text-muted-foreground mb-3" />
               <p className="text-sm text-muted-foreground mb-1">No guide generated yet</p>
               <p className="text-xs text-muted-foreground">Select a strategy and click "Generate Guide" for a complete masterclass based on your real data</p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function StrategyOptimizerTab() {
+  const [analysis, setAnalysis] = useState<string | null>(null);
+
+  const { data: analyzedData } = useQuery<{ analyzedIds: number[] }>({
+    queryKey: ["/api/advisor/analyzed-signals"],
+  });
+  const analyzedCount = analyzedData?.analyzedIds?.length || 0;
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/advisor/strategy-optimizer");
+      return res.json();
+    },
+    onSuccess: (data) => setAnalysis(data.analysis),
+  });
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div>
+              <CardTitle className="text-base font-medium">Strategy Optimizer</CardTitle>
+              <CardDescription className="text-xs">
+                Concrete parameter recommendations and code improvement suggestions based on your analyzed trades. Advisory only \u2014 nothing is auto-applied.
+              </CardDescription>
+            </div>
+            <Button
+              onClick={() => mutation.mutate()}
+              disabled={mutation.isPending || analyzedCount < 3}
+              data-testid="button-optimizer-analyze"
+            >
+              {mutation.isPending ? (
+                <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Generating...</>
+              ) : (
+                <><Settings2 className="w-4 h-4 mr-2" /> {analysis ? "Regenerate" : "Generate Recommendations"}</>
+              )}
+            </Button>
+          </div>
+          {analyzedCount < 3 && (
+            <div className="mt-2 p-3 rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs">
+              Requires at least 3 deep-dive analyzed trades. Currently {analyzedCount} analyzed. Go to Trade Deep Dive tab to analyze more signals first.
+            </div>
+          )}
+          {analyzedCount >= 3 && (
+            <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+              {analyzedCount} trades analyzed \u2014 recommendations will be grounded in verified data
+            </div>
+          )}
+        </CardHeader>
+        <CardContent>
+          {mutation.isPending && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3 p-4 rounded-md bg-muted/50">
+                <Loader2 className="w-5 h-5 animate-spin text-violet-500" />
+                <div>
+                  <p className="text-sm font-medium">Generating optimization recommendations...</p>
+                  <p className="text-xs text-muted-foreground">The AI is aggregating findings from {analyzedCount} deep-dive analyses to identify concrete strategy improvements. This may take 30-60 seconds.</p>
+                </div>
+              </div>
+              {[1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-16 w-full" />)}
+            </div>
+          )}
+          {mutation.isError && (
+            <div className="p-4 rounded-md bg-red-500/10 text-red-500 text-sm" data-testid="text-optimizer-error">
+              Failed to generate recommendations. {(mutation.error as Error)?.message || "Please try again."}
+            </div>
+          )}
+          {analysis && !mutation.isPending && (
+            <div>
+              <div className="mb-4 p-3 rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs flex items-center gap-2">
+                <Settings2 className="w-4 h-4 shrink-0" />
+                These are recommendations only. No changes have been applied to your strategies. Review each suggestion and discuss with your developer before implementing.
+              </div>
+              <div className="prose prose-sm dark:prose-invert max-w-none" data-testid="text-optimizer-analysis">
+                <ReactMarkdown>{analysis}</ReactMarkdown>
+              </div>
+            </div>
+          )}
+          {!analysis && !mutation.isPending && !mutation.isError && analyzedCount >= 3 && (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <Settings2 className="w-10 h-10 text-muted-foreground mb-3" />
+              <p className="text-sm text-muted-foreground mb-1">No recommendations generated yet</p>
+              <p className="text-xs text-muted-foreground">Click "Generate Recommendations" for data-driven strategy improvements</p>
             </div>
           )}
         </CardContent>

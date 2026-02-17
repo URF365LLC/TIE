@@ -5,7 +5,7 @@ import { runScanCycle } from "./scanner";
 import { WHITELIST, canonicalToVendor } from "@shared/schema";
 import { log } from "./logger";
 import { z } from "zod";
-import { analyzePortfolio, analyzeTradeDeep, generateStrategyGuide } from "./advisor";
+import { analyzePortfolio, analyzeTradeDeep, batchAnalyzeTrades, generateStrategyGuide, generateStrategyOptimizer } from "./advisor";
 
 const settingsUpdateSchema = z.object({
   scanEnabled: z.boolean().optional(),
@@ -201,6 +201,53 @@ export async function registerRoutes(
       res.json({ analysis });
     } catch (err: any) {
       log(`Strategy guide error: ${err.message}`, "advisor");
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.post("/api/advisor/batch-analyze", async (req, res) => {
+    try {
+      const { signalIds } = req.body;
+      if (!signalIds || !Array.isArray(signalIds) || signalIds.length === 0) {
+        return res.status(400).json({ message: "signalIds array required" });
+      }
+      if (signalIds.length > 30) {
+        return res.status(400).json({ message: "Maximum 30 signals per batch" });
+      }
+      const result = await batchAnalyzeTrades(signalIds);
+      res.json(result);
+    } catch (err: any) {
+      log(`Batch analysis error: ${err.message}`, "advisor");
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.get("/api/advisor/analyzed-signals", async (_req, res) => {
+    try {
+      const ids = await storage.getAnalyzedSignalIds();
+      res.json({ analyzedIds: ids });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.get("/api/advisor/trade-analysis/:signalId", async (req, res) => {
+    try {
+      const signalId = parseInt(req.params.signalId);
+      const analysis = await storage.getTradeAnalysis(signalId);
+      if (!analysis) return res.status(404).json({ message: "No analysis found for this signal" });
+      res.json(analysis);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.post("/api/advisor/strategy-optimizer", async (_req, res) => {
+    try {
+      const analysis = await generateStrategyOptimizer();
+      res.json({ analysis });
+    } catch (err: any) {
+      log(`Strategy optimizer error: ${err.message}`, "advisor");
       res.status(500).json({ message: err.message });
     }
   });

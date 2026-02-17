@@ -27,7 +27,7 @@ Analysis-only trading intelligence platform that scans markets using Twelve Data
 - `/instruments` - Instrument whitelist by asset class
 - `/instruments/:symbol` - Symbol detail with chart + indicators
 - `/backtest` - Backtest statistics and archived signal outcomes (position sizing inline)
-- `/advisor` - AI Technical Advisor (Portfolio Intelligence, Trade Deep Dive with 1m candles, Strategy Masterclass)
+- `/advisor` - AI Technical Advisor (Portfolio Intelligence, Trade Deep Dive with 1m candles + batch, Strategy Masterclass, Strategy Optimizer)
 - `/settings` - Scanner, risk management (account balance, risk %), and email configuration
 
 ## API Routes
@@ -47,7 +47,11 @@ Analysis-only trading intelligence platform that scans markets using Twelve Data
 - `GET /api/dashboard/stats` - Dashboard statistics
 - `POST /api/advisor/portfolio-analysis` - AI portfolio-wide pattern analysis
 - `POST /api/advisor/trade-analysis` - AI deep dive on single signal (body: { signalId })
+- `POST /api/advisor/batch-analyze` - Batch deep dive on multiple signals (body: { signalIds[] })
+- `GET /api/advisor/analyzed-signals` - List signal IDs that have stored analyses
+- `GET /api/advisor/trade-analysis/:signalId` - Get stored analysis for a signal
 - `POST /api/advisor/strategy-guide` - AI strategy masterclass (body: { strategy })
+- `POST /api/advisor/strategy-optimizer` - AI strategy optimizer recommendations
 
 ## Environment Variables
 - `DATABASE_URL` - PostgreSQL connection (auto-provided)
