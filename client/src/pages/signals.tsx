@@ -5,27 +5,30 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { TrendingUp, TrendingDown, Zap, Filter, X, ChevronDown, ChevronUp, Target, ShieldAlert, CircleDollarSign, Crosshair, Check, XCircle } from "lucide-react";
+import { TrendingUp, TrendingDown, Zap, Filter, X, ChevronDown, ChevronUp, Target, ShieldAlert, CircleDollarSign, Crosshair, Check, XCircle, Scale } from "lucide-react";
 import { Link } from "wouter";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import type { SignalWithInstrument } from "@shared/schema";
+import type { SignalWithInstrument, Settings } from "@shared/schema";
 
 export default function SignalsPage() {
   const [strategyFilter, setStrategyFilter] = useState<string>("all");
   const [directionFilter, setDirectionFilter] = useState<string>("all");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<string>("active");
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
   const queryParams = new URLSearchParams();
   if (strategyFilter !== "all") queryParams.set("strategy", strategyFilter);
   if (directionFilter !== "all") queryParams.set("direction", directionFilter);
-  if (statusFilter !== "all") queryParams.set("status", statusFilter);
+  if (statusFilter === "active") queryParams.set("status", "active");
+  else if (statusFilter !== "all") queryParams.set("status", statusFilter);
 
   const qs = queryParams.toString();
   const { data: signals, isLoading } = useQuery<SignalWithInstrument[]>({
     queryKey: ["/api/signals", qs ? `?${qs}` : ""],
     refetchInterval: 15000,
   });
+
+  const { data: settings } = useQuery<Settings>({ queryKey: ["/api/settings"] });
 
   const actionMutation = useMutation({
     mutationFn: async ({ id, action }: { id: number; action: string }) => {
@@ -39,7 +42,7 @@ export default function SignalsPage() {
     },
   });
 
-  const hasFilters = strategyFilter !== "all" || directionFilter !== "all" || statusFilter !== "all";
+  const hasFilters = strategyFilter !== "all" || directionFilter !== "all" || statusFilter !== "active";
 
   return (
     <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto">
@@ -59,7 +62,7 @@ export default function SignalsPage() {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => { setStrategyFilter("all"); setDirectionFilter("all"); setStatusFilter("all"); }}
+                onClick={() => { setStrategyFilter("all"); setDirectionFilter("all"); setStatusFilter("active"); }}
                 data-testid="button-clear-filters"
               >
                 <X className="w-3 h-3 mr-1" /> Clear
@@ -94,6 +97,7 @@ export default function SignalsPage() {
                 <SelectValue placeholder="Status" />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="active">Active Only</SelectItem>
                 <SelectItem value="all">All Status</SelectItem>
                 <SelectItem value="NEW">New</SelectItem>
                 <SelectItem value="ALERTED">Alerted</SelectItem>
@@ -117,7 +121,7 @@ export default function SignalsPage() {
               <Zap className="w-10 h-10 text-muted-foreground mb-3" />
               <p className="text-sm text-muted-foreground">No signals match your filters</p>
               {hasFilters && (
-                <Button variant="ghost" size="sm" className="mt-2" onClick={() => { setStrategyFilter("all"); setDirectionFilter("all"); setStatusFilter("all"); }}>
+                <Button variant="ghost" size="sm" className="mt-2" onClick={() => { setStrategyFilter("all"); setDirectionFilter("all"); setStatusFilter("active"); }}>
                   Clear filters
                 </Button>
               )}
@@ -213,6 +217,16 @@ export default function SignalsPage() {
                                 color="text-foreground"
                               />
                             </div>
+                          )}
+
+                          {hasLevels && settings && reason.stopDistance != null && reason.stopDistance > 0 && (
+                            <PositionSizeCard
+                              accountBalance={settings.accountBalance}
+                              riskPercent={settings.riskPercent}
+                              stopDistance={reason.stopDistance}
+                              entryPrice={reason.entryPrice}
+                              assetClass={sig.instrument.assetClass}
+                            />
                           )}
 
                           <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-2 text-xs">
@@ -361,5 +375,60 @@ function ScoreBadge({ score }: { score: number }) {
     <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${color}`}>
       {score}
     </span>
+  );
+}
+
+function calcPositionSize(accountBalance: number, riskPercent: number, stopDistance: number, entryPrice: number, assetClass: string) {
+  const riskAmount = (accountBalance * riskPercent) / 100;
+  if (assetClass === "FOREX") {
+    const isJpy = entryPrice > 50;
+    const pipSize = isJpy ? 0.01 : 0.0001;
+    const pipsAtRisk = stopDistance / pipSize;
+    const pipValuePerLot = isJpy ? (0.01 / entryPrice) * 100000 : 10;
+    const lots = riskAmount / (pipsAtRisk * pipValuePerLot);
+    return { units: lots, label: "lots", riskAmount };
+  }
+  if (assetClass === "METAL") {
+    const contractSize = entryPrice > 100 ? 100 : 5000;
+    const lots = riskAmount / (stopDistance * contractSize);
+    return { units: lots, label: "lots", riskAmount };
+  }
+  const units = riskAmount / stopDistance;
+  return { units, label: "units", riskAmount };
+}
+
+function PositionSizeCard({ accountBalance, riskPercent, stopDistance, entryPrice, assetClass }: {
+  accountBalance: number;
+  riskPercent: number;
+  stopDistance: number;
+  entryPrice: number;
+  assetClass: string;
+}) {
+  const ps = calcPositionSize(accountBalance, riskPercent, stopDistance, entryPrice, assetClass);
+  const unitsDisplay = assetClass === "FOREX"
+    ? ps.units.toFixed(2)
+    : ps.units < 1 ? ps.units.toFixed(6) : ps.units.toFixed(2);
+
+  return (
+    <div className="rounded-md border bg-background p-3" data-testid="position-size-card">
+      <div className="flex items-center gap-2 mb-2">
+        <Scale className="w-3.5 h-3.5 text-muted-foreground" />
+        <span className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Position Sizing</span>
+      </div>
+      <div className="grid grid-cols-3 gap-3 text-xs">
+        <div>
+          <span className="text-muted-foreground">Risk Amount</span>
+          <p className="font-semibold text-sm" data-testid="text-risk-amount">${ps.riskAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+        </div>
+        <div>
+          <span className="text-muted-foreground">Position Size</span>
+          <p className="font-semibold text-sm" data-testid="text-position-size">{unitsDisplay} {ps.label}</p>
+        </div>
+        <div>
+          <span className="text-muted-foreground">Settings</span>
+          <p className="text-muted-foreground">${accountBalance.toLocaleString()} / {riskPercent}%</p>
+        </div>
+      </div>
+    </div>
   );
 }

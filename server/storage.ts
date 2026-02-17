@@ -49,7 +49,7 @@ export interface IStorage {
   upsertScanProgress(data: InsertScanProgress): Promise<void>;
 
   getSignalById(id: number): Promise<SignalWithInstrument | undefined>;
-  getSignals(filters?: { strategy?: string; direction?: string; status?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]>;
+  getSignals(filters?: { strategy?: string; direction?: string; status?: string; activeOnly?: boolean; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]>;
   getArchivedSignals(filters?: { strategy?: string; direction?: string; outcome?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]>;
   findActiveSignal(instrumentId: number, timeframe: string, strategy: string, direction: string): Promise<Signal | undefined>;
   getExpiredNewSignals(maxAgeMs: number): Promise<Signal[]>;
@@ -218,11 +218,15 @@ export class DatabaseStorage implements IStorage {
     return { ...rows[0].signals, instrument: rows[0].instruments };
   }
 
-  async getSignals(filters?: { strategy?: string; direction?: string; status?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]> {
+  async getSignals(filters?: { strategy?: string; direction?: string; status?: string; activeOnly?: boolean; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]> {
     const conditions = [];
     if (filters?.strategy) conditions.push(eq(signals.strategy, filters.strategy));
     if (filters?.direction) conditions.push(eq(signals.direction, filters.direction));
-    if (filters?.status) conditions.push(eq(signals.status, filters.status));
+    if (filters?.activeOnly) {
+      conditions.push(inArray(signals.status, ["NEW", "ALERTED"]));
+    } else if (filters?.status) {
+      conditions.push(eq(signals.status, filters.status));
+    }
     if (filters?.symbol) {
       const inst = await this.getInstrumentBySymbol(filters.symbol);
       if (inst) conditions.push(eq(signals.instrumentId, inst.id));

@@ -143,6 +143,8 @@ export const settings = pgTable("settings", {
   maxSymbolsPerBurst: integer("max_symbols_per_burst").notNull().default(4),
   burstSleepMs: integer("burst_sleep_ms").notNull().default(1000),
   alertCooldownMinutes: integer("alert_cooldown_minutes").notNull().default(60),
+  accountBalance: integer("account_balance").notNull().default(50000),
+  riskPercent: real("risk_percent").notNull().default(1.0),
 });
 
 export const insertInstrumentSchema = createInsertSchema(instruments).omit({ id: true, createdAt: true, updatedAt: true });

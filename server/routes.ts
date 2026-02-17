@@ -15,6 +15,8 @@ const settingsUpdateSchema = z.object({
   maxSymbolsPerBurst: z.number().int().min(1).max(10).optional(),
   burstSleepMs: z.number().int().min(500).max(5000).optional(),
   alertCooldownMinutes: z.number().int().min(1).max(1440).optional(),
+  accountBalance: z.number().int().min(10000).max(500000).optional(),
+  riskPercent: z.number().min(0.25).max(2).optional(),
 });
 
 export async function registerRoutes(
@@ -78,7 +80,13 @@ export async function registerRoutes(
     const filters: any = {};
     if (req.query.strategy) filters.strategy = req.query.strategy;
     if (req.query.direction) filters.direction = req.query.direction;
-    if (req.query.status) filters.status = req.query.status;
+    if (req.query.status) {
+      if (req.query.status === "active") {
+        filters.activeOnly = true;
+      } else {
+        filters.status = req.query.status;
+      }
+    }
     if (req.query.symbol) filters.symbol = req.query.symbol;
     if (req.query.limit) filters.limit = parseInt(req.query.limit as string);
 

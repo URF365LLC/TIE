@@ -5,9 +5,9 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { TrendingUp, TrendingDown, Trophy, XCircle, HelpCircle, Filter, X, BarChart3, Target, Percent } from "lucide-react";
+import { TrendingUp, TrendingDown, Trophy, XCircle, HelpCircle, Filter, X, BarChart3, Target, Percent, Scale } from "lucide-react";
 import { Link } from "wouter";
-import type { SignalWithInstrument } from "@shared/schema";
+import type { SignalWithInstrument, Settings } from "@shared/schema";
 
 interface BacktestStats {
   total: number;
@@ -40,6 +40,8 @@ export default function BacktestPage() {
     queryKey: ["/api/backtest/signals", qs ? `?${qs}` : ""],
     refetchInterval: 30000,
   });
+
+  const { data: settings } = useQuery<Settings>({ queryKey: ["/api/settings"] });
 
   const hasFilters = strategyFilter !== "all" || directionFilter !== "all" || outcomeFilter !== "all";
   const winRate = stats && stats.total > 0 ? ((stats.wins / stats.total) * 100).toFixed(1) : "—";
@@ -231,6 +233,11 @@ export default function BacktestPage() {
                           {hasLevels && (
                             <span className="hidden sm:inline">
                               Entry {formatPrice(reason.entryPrice)} · <span className="text-red-400">SL {formatPrice(reason.stopLoss)}</span> · <span className="text-emerald-400">TP {formatPrice(reason.takeProfit)}</span>
+                              {settings && reason.stopDistance > 0 && (() => {
+                                const ps = calcPositionSize(settings.accountBalance, settings.riskPercent, reason.stopDistance, reason.entryPrice, sig.instrument.assetClass);
+                                const display = sig.instrument.assetClass === "FOREX" ? ps.units.toFixed(2) + " lots" : (ps.units < 1 ? ps.units.toFixed(6) : ps.units.toFixed(2)) + " units";
+                                return <> · <Scale className="w-3 h-3 inline" /> {display}</>;
+                              })()}
                             </span>
                           )}
                         </div>
@@ -249,6 +256,25 @@ export default function BacktestPage() {
       </Card>
     </div>
   );
+}
+
+function calcPositionSize(accountBalance: number, riskPercent: number, stopDistance: number, entryPrice: number, assetClass: string) {
+  const riskAmount = (accountBalance * riskPercent) / 100;
+  if (assetClass === "FOREX") {
+    const isJpy = entryPrice > 50;
+    const pipSize = isJpy ? 0.01 : 0.0001;
+    const pipsAtRisk = stopDistance / pipSize;
+    const pipValuePerLot = isJpy ? (0.01 / entryPrice) * 100000 : 10;
+    const lots = riskAmount / (pipsAtRisk * pipValuePerLot);
+    return { units: lots, label: "lots", riskAmount };
+  }
+  if (assetClass === "METAL") {
+    const contractSize = entryPrice > 100 ? 100 : 5000;
+    const lots = riskAmount / (stopDistance * contractSize);
+    return { units: lots, label: "lots", riskAmount };
+  }
+  const units = riskAmount / stopDistance;
+  return { units, label: "units", riskAmount };
 }
 
 function formatPrice(value: number | string | undefined): string {

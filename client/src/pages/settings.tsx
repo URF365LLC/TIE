@@ -6,7 +6,8 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
-import { Settings as SettingsIcon, Mail, Gauge, Save } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Settings as SettingsIcon, Mail, Gauge, Save, ShieldAlert } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect } from "react";
@@ -28,6 +29,8 @@ export default function SettingsPage() {
     maxSymbolsPerBurst: 4,
     burstSleepMs: 1000,
     alertCooldownMinutes: 60,
+    accountBalance: 50000,
+    riskPercent: 1.0,
   });
 
   useEffect(() => {
@@ -41,6 +44,8 @@ export default function SettingsPage() {
         maxSymbolsPerBurst: settings.maxSymbolsPerBurst,
         burstSleepMs: settings.burstSleepMs,
         alertCooldownMinutes: settings.alertCooldownMinutes,
+        accountBalance: settings.accountBalance,
+        riskPercent: settings.riskPercent,
       });
     }
   }, [settings]);
@@ -139,6 +144,65 @@ export default function SettingsPage() {
               />
               <p className="text-[11px] text-muted-foreground">Delay between burst cycles in milliseconds</p>
             </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4 text-muted-foreground" />
+            <div>
+              <CardTitle className="text-base font-medium">Risk Management</CardTitle>
+              <CardDescription className="text-xs">Set your account size and risk per trade for position sizing</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label className="text-sm">Account Balance ($)</Label>
+              <Input
+                type="number"
+                min={10000}
+                max={500000}
+                step={1000}
+                value={form.accountBalance}
+                onChange={(e) => setForm({ ...form, accountBalance: parseInt(e.target.value) || 50000 })}
+                data-testid="input-account-balance"
+              />
+              <p className="text-[11px] text-muted-foreground">Your trading account size ($10,000 - $500,000)</p>
+            </div>
+            <div className="space-y-2">
+              <Label className="text-sm">Risk per Trade (%)</Label>
+              <Select
+                value={String(form.riskPercent)}
+                onValueChange={(v) => setForm({ ...form, riskPercent: parseFloat(v) })}
+              >
+                <SelectTrigger data-testid="select-risk-percent">
+                  <SelectValue placeholder="Risk %" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="2">2.00%</SelectItem>
+                  <SelectItem value="1.75">1.75%</SelectItem>
+                  <SelectItem value="1.5">1.50%</SelectItem>
+                  <SelectItem value="1.25">1.25%</SelectItem>
+                  <SelectItem value="1">1.00%</SelectItem>
+                  <SelectItem value="0.75">0.75%</SelectItem>
+                  <SelectItem value="0.5">0.50%</SelectItem>
+                  <SelectItem value="0.25">0.25%</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground">Maximum risk percentage per trade</p>
+            </div>
+          </div>
+          <div className="rounded-md bg-muted/50 p-3">
+            <p className="text-xs text-muted-foreground">
+              Risk amount per trade: <span className="font-semibold text-foreground">${((form.accountBalance * form.riskPercent) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+            </p>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Position size is calculated as: (Account Balance x Risk %) / Stop Loss Distance
+            </p>
           </div>
         </CardContent>
       </Card>
