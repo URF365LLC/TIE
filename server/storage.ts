@@ -9,6 +9,7 @@ import {
   signals,
   alertEvents,
   settings,
+  tradeAnalyses,
   type Instrument,
   type InsertInstrument,
   type Candle,
@@ -25,6 +26,8 @@ import {
   type InsertAlertEvent,
   type Settings,
   type InsertSettings,
+  type TradeAnalysis,
+  type InsertTradeAnalysis,
   type SignalWithInstrument,
 } from "@shared/schema";
 
@@ -59,6 +62,11 @@ export interface IStorage {
   getBacktestStats(): Promise<{ total: number; wins: number; losses: number; missed: number; byStrategy: Record<string, { total: number; wins: number }>; byDirection: Record<string, { total: number; wins: number }>;  takenWins: number; takenTotal: number }>;
 
   createAlertEvent(data: InsertAlertEvent): Promise<AlertEvent>;
+
+  getTradeAnalysis(signalId: number): Promise<TradeAnalysis | undefined>;
+  getTradeAnalyses(signalIds?: number[]): Promise<TradeAnalysis[]>;
+  getAnalyzedSignalIds(): Promise<number[]>;
+  upsertTradeAnalysis(data: InsertTradeAnalysis): Promise<TradeAnalysis>;
 
   getSettings(): Promise<Settings>;
   upsertSettings(data: Partial<InsertSettings>): Promise<Settings>;
@@ -351,6 +359,45 @@ export class DatabaseStorage implements IStorage {
 
   async createAlertEvent(data: InsertAlertEvent): Promise<AlertEvent> {
     const [row] = await db.insert(alertEvents).values(data).returning();
+    return row;
+  }
+
+  async getTradeAnalysis(signalId: number): Promise<TradeAnalysis | undefined> {
+    const [row] = await db.select().from(tradeAnalyses).where(eq(tradeAnalyses.signalId, signalId)).limit(1);
+    return row;
+  }
+
+  async getTradeAnalyses(signalIds?: number[]): Promise<TradeAnalysis[]> {
+    if (signalIds && signalIds.length > 0) {
+      return db.select().from(tradeAnalyses).where(inArray(tradeAnalyses.signalId, signalIds)).orderBy(desc(tradeAnalyses.analyzedAt));
+    }
+    return db.select().from(tradeAnalyses).orderBy(desc(tradeAnalyses.analyzedAt));
+  }
+
+  async getAnalyzedSignalIds(): Promise<number[]> {
+    const rows = await db.select({ signalId: tradeAnalyses.signalId }).from(tradeAnalyses);
+    return rows.map((r) => r.signalId);
+  }
+
+  async upsertTradeAnalysis(data: InsertTradeAnalysis): Promise<TradeAnalysis> {
+    const [row] = await db
+      .insert(tradeAnalyses)
+      .values(data)
+      .onConflictDoUpdate({
+        target: tradeAnalyses.signalId,
+        set: {
+          analysis: data.analysis,
+          keyFindings: data.keyFindings,
+          winLossFactors: data.winLossFactors,
+          priceActionPatterns: data.priceActionPatterns,
+          marketPsychology: data.marketPsychology,
+          entryQuality: data.entryQuality,
+          chartPatterns: data.chartPatterns,
+          lessonsLearned: data.lessonsLearned,
+          analyzedAt: new Date(),
+        },
+      })
+      .returning();
     return row;
   }
 

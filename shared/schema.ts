@@ -147,6 +147,20 @@ export const settings = pgTable("settings", {
   riskPercent: real("risk_percent").notNull().default(1.0),
 });
 
+export const tradeAnalyses = pgTable("trade_analyses", {
+  id: serial("id").primaryKey(),
+  signalId: integer("signal_id").notNull().references(() => signals.id).unique(),
+  analysis: text("analysis").notNull(),
+  keyFindings: text("key_findings"),
+  winLossFactors: text("win_loss_factors"),
+  priceActionPatterns: text("price_action_patterns"),
+  marketPsychology: text("market_psychology"),
+  entryQuality: varchar("entry_quality", { length: 20 }),
+  chartPatterns: text("chart_patterns"),
+  lessonsLearned: text("lessons_learned"),
+  analyzedAt: timestamp("analyzed_at", tz).notNull().defaultNow(),
+});
+
 export const insertInstrumentSchema = createInsertSchema(instruments).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertCandleSchema = createInsertSchema(candles).omit({ id: true });
 export const insertIndicatorSchema = createInsertSchema(indicators).omit({ id: true });
@@ -155,6 +169,7 @@ export const insertScanProgressSchema = createInsertSchema(scanProgress).omit({ 
 export const insertSignalSchema = createInsertSchema(signals).omit({ id: true });
 export const insertAlertEventSchema = createInsertSchema(alertEvents).omit({ id: true });
 export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });
+export const insertTradeAnalysisSchema = createInsertSchema(tradeAnalyses).omit({ id: true, analyzedAt: true });
 
 export type Instrument = typeof instruments.$inferSelect;
 export type InsertInstrument = z.infer<typeof insertInstrumentSchema>;
@@ -172,6 +187,8 @@ export type AlertEvent = typeof alertEvents.$inferSelect;
 export type InsertAlertEvent = z.infer<typeof insertAlertEventSchema>;
 export type Settings = typeof settings.$inferSelect;
 export type InsertSettings = z.infer<typeof insertSettingsSchema>;
+export type TradeAnalysis = typeof tradeAnalyses.$inferSelect;
+export type InsertTradeAnalysis = z.infer<typeof insertTradeAnalysisSchema>;
 
 export const WHITELIST = {
   FOREX: [
