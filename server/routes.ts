@@ -5,6 +5,7 @@ import { runScanCycle } from "./scanner";
 import { WHITELIST, canonicalToVendor } from "@shared/schema";
 import { log } from "./logger";
 import { z } from "zod";
+import { analyzePortfolio, analyzeTradeDeep, generateStrategyGuide } from "./advisor";
 
 const settingsUpdateSchema = z.object({
   scanEnabled: z.boolean().optional(),
@@ -166,6 +167,42 @@ export async function registerRoutes(
   app.get("/api/dashboard/stats", async (_req, res) => {
     const stats = await storage.getDashboardStats();
     res.json(stats);
+  });
+
+  app.post("/api/advisor/portfolio-analysis", async (_req, res) => {
+    try {
+      const analysis = await analyzePortfolio();
+      res.json({ analysis });
+    } catch (err: any) {
+      log(`Portfolio analysis error: ${err.message}`, "advisor");
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.post("/api/advisor/trade-analysis", async (req, res) => {
+    try {
+      const { signalId } = req.body;
+      if (!signalId) return res.status(400).json({ message: "signalId required" });
+      const analysis = await analyzeTradeDeep(signalId);
+      res.json({ analysis });
+    } catch (err: any) {
+      log(`Trade analysis error: ${err.message}`, "advisor");
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.post("/api/advisor/strategy-guide", async (req, res) => {
+    try {
+      const { strategy } = req.body;
+      if (!strategy || !["TREND_CONTINUATION", "RANGE_BREAKOUT"].includes(strategy)) {
+        return res.status(400).json({ message: "strategy must be TREND_CONTINUATION or RANGE_BREAKOUT" });
+      }
+      const analysis = await generateStrategyGuide(strategy);
+      res.json({ analysis });
+    } catch (err: any) {
+      log(`Strategy guide error: ${err.message}`, "advisor");
+      res.status(500).json({ message: err.message });
+    }
   });
 
   return httpServer;

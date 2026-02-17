@@ -13,6 +13,7 @@ import InstrumentsPage from "@/pages/instruments";
 import SymbolView from "@/pages/symbol-view";
 import SettingsPage from "@/pages/settings";
 import BacktestPage from "@/pages/backtest";
+import AdvisorPage from "@/pages/advisor";
 
 function Router() {
   return (
@@ -20,6 +21,7 @@ function Router() {
       <Route path="/" component={Dashboard} />
       <Route path="/signals" component={SignalsPage} />
       <Route path="/backtest" component={BacktestPage} />
+      <Route path="/advisor" component={AdvisorPage} />
       <Route path="/instruments" component={InstrumentsPage} />
       <Route path="/instruments/:symbol" component={SymbolView} />
       <Route path="/settings" component={SettingsPage} />

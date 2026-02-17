@@ -1,5 +1,5 @@
 import { useLocation, Link } from "wouter";
-import { BarChart3, Activity, Eye, Settings, Zap, FlaskConical } from "lucide-react";
+import { BarChart3, Activity, Eye, Settings, Zap, FlaskConical, Brain } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -19,6 +19,7 @@ const navItems = [
   { title: "Dashboard", url: "/", icon: BarChart3 },
   { title: "Signals", url: "/signals", icon: Zap },
   { title: "Backtest", url: "/backtest", icon: FlaskConical },
+  { title: "Advisor", url: "/advisor", icon: Brain },
   { title: "Instruments", url: "/instruments", icon: Eye },
   { title: "Settings", url: "/settings", icon: Settings },
 ];

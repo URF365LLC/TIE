@@ -23,11 +23,12 @@ Analysis-only trading intelligence platform that scans markets using Twelve Data
 
 ## Pages
 - `/` - Dashboard (stats, recent signals, scan runs)
-- `/signals` - Signal table with filters
+- `/signals` - Signal table with filters (defaults to Active Only, position sizing in expanded detail)
 - `/instruments` - Instrument whitelist by asset class
 - `/instruments/:symbol` - Symbol detail with chart + indicators
-- `/backtest` - Backtest statistics and archived signal outcomes
-- `/settings` - Scanner and email configuration
+- `/backtest` - Backtest statistics and archived signal outcomes (position sizing inline)
+- `/advisor` - AI Technical Advisor (Portfolio Intelligence, Trade Deep Dive with 1m candles, Strategy Masterclass)
+- `/settings` - Scanner, risk management (account balance, risk %), and email configuration
 
 ## API Routes
 - `GET /api/instruments` - List all instruments
@@ -44,6 +45,9 @@ Analysis-only trading intelligence platform that scans markets using Twelve Data
 - `GET /api/settings` - Get settings
 - `POST /api/settings` - Update settings
 - `GET /api/dashboard/stats` - Dashboard statistics
+- `POST /api/advisor/portfolio-analysis` - AI portfolio-wide pattern analysis
+- `POST /api/advisor/trade-analysis` - AI deep dive on single signal (body: { signalId })
+- `POST /api/advisor/strategy-guide` - AI strategy masterclass (body: { strategy })
 
 ## Environment Variables
 - `DATABASE_URL` - PostgreSQL connection (auto-provided)
@@ -51,6 +55,8 @@ Analysis-only trading intelligence platform that scans markets using Twelve Data
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` - Email (optional)
 - `SMTP_FROM_EMAIL`, `ALERT_TO_EMAIL` - Email addresses (optional)
 - `SESSION_SECRET` - Session secret
+- `AI_INTEGRATIONS_OPENAI_API_KEY` - OpenAI via Replit AI Integrations (auto-managed)
+- `AI_INTEGRATIONS_OPENAI_BASE_URL` - OpenAI base URL (auto-managed)
 
 ## Trading Universe
 - 28 Forex pairs, 2 Metals (XAU/USD, XAG/USD), 8 Crypto pairs

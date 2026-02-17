@@ -153,6 +153,10 @@ export async function fetchTimeSeries(vendorSymbol: string, interval: string, ou
   return requestWithRetry("time_series", { symbol: vendorSymbol, interval, outputsize, timezone: "UTC" });
 }
 
+export async function fetchTimeSeriesRange(vendorSymbol: string, interval: string, startDate: string, endDate: string): Promise<any[]> {
+  return requestWithRetry("time_series", { symbol: vendorSymbol, interval, start_date: startDate, end_date: endDate, timezone: "UTC" });
+}
+
 export async function fetchEMA(vendorSymbol: string, interval: string, timePeriod: number, outputsize = 300): Promise<any[]> {
   return requestWithRetry("ema", { symbol: vendorSymbol, interval, time_period: timePeriod, outputsize, timezone: "UTC" });
 }
