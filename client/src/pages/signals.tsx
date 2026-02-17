@@ -1,12 +1,13 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { TrendingUp, TrendingDown, Zap, Filter, X, ChevronDown, ChevronUp, Target, ShieldAlert, CircleDollarSign, Crosshair } from "lucide-react";
+import { TrendingUp, TrendingDown, Zap, Filter, X, ChevronDown, ChevronUp, Target, ShieldAlert, CircleDollarSign, Crosshair, Check, XCircle } from "lucide-react";
 import { Link } from "wouter";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { SignalWithInstrument } from "@shared/schema";
 
 export default function SignalsPage() {
@@ -24,6 +25,18 @@ export default function SignalsPage() {
   const { data: signals, isLoading } = useQuery<SignalWithInstrument[]>({
     queryKey: ["/api/signals", qs ? `?${qs}` : ""],
     refetchInterval: 15000,
+  });
+
+  const actionMutation = useMutation({
+    mutationFn: async ({ id, action }: { id: number; action: string }) => {
+      await apiRequest("POST", `/api/signals/${id}/action`, { action });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/signals"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/backtest/signals"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/backtest/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/stats"] });
+    },
   });
 
   const hasFilters = strategyFilter !== "all" || directionFilter !== "all" || statusFilter !== "all";
@@ -84,7 +97,9 @@ export default function SignalsPage() {
                 <SelectItem value="all">All Status</SelectItem>
                 <SelectItem value="NEW">New</SelectItem>
                 <SelectItem value="ALERTED">Alerted</SelectItem>
-                <SelectItem value="IGNORED">Ignored</SelectItem>
+                <SelectItem value="TAKEN">Taken</SelectItem>
+                <SelectItem value="NOT_TAKEN">Not Taken</SelectItem>
+                <SelectItem value="EXPIRED">Expired</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -136,10 +151,10 @@ export default function SignalsPage() {
                               {sig.strategy.replace(/_/g, " ")}
                             </Badge>
                             <Badge
-                              variant={sig.status === "NEW" ? "default" : sig.status === "ALERTED" ? "secondary" : "outline"}
-                              className="text-[10px]"
+                              variant={sig.status === "NEW" ? "default" : sig.status === "TAKEN" ? "default" : sig.status === "ALERTED" ? "secondary" : "outline"}
+                              className={`text-[10px] ${sig.status === "TAKEN" ? "bg-emerald-500/80" : sig.status === "EXPIRED" ? "bg-muted" : ""}`}
                             >
-                              {sig.status}
+                              {sig.status.replace(/_/g, " ")}
                             </Badge>
                           </div>
                           <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground flex-wrap">
@@ -237,6 +252,40 @@ export default function SignalsPage() {
                               {reason.breakout && <ReasonChip label="Breakout" value={String(reason.breakout)} />}
                             </div>
                           </div>
+
+                          {sig.status === "NEW" && (
+                            <div className="flex items-center gap-2 pt-2 border-t">
+                              <span className="text-xs text-muted-foreground mr-auto">Mark this signal:</span>
+                              <Button
+                                size="sm"
+                                variant="default"
+                                disabled={actionMutation.isPending}
+                                onClick={(e) => { e.stopPropagation(); actionMutation.mutate({ id: sig.id, action: "TAKEN" }); }}
+                                data-testid={`button-taken-${sig.id}`}
+                              >
+                                <Check className="w-3 h-3 mr-1" /> Taken
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={actionMutation.isPending}
+                                onClick={(e) => { e.stopPropagation(); actionMutation.mutate({ id: sig.id, action: "NOT_TAKEN" }); }}
+                                data-testid={`button-not-taken-${sig.id}`}
+                              >
+                                <XCircle className="w-3 h-3 mr-1" /> Not Taken
+                              </Button>
+                            </div>
+                          )}
+
+                          {sig.outcome && (
+                            <div className="flex items-center gap-2 pt-2 border-t">
+                              <span className="text-xs text-muted-foreground">Outcome:</span>
+                              <OutcomeBadge outcome={sig.outcome} />
+                              {sig.outcomePrice != null && (
+                                <span className="text-xs text-muted-foreground">@ {formatPrice(sig.outcomePrice)}</span>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}
@@ -286,6 +335,19 @@ function ReasonChip({ label, value }: { label: string; value: string }) {
     <span className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] bg-background">
       <span className="font-medium">{label}:</span>
       <span className="text-muted-foreground">{value}</span>
+    </span>
+  );
+}
+
+function OutcomeBadge({ outcome }: { outcome: string }) {
+  const map: Record<string, string> = {
+    WIN: "bg-emerald-500/10 text-emerald-500 dark:bg-emerald-500/20",
+    LOSS: "bg-red-500/10 text-red-500 dark:bg-red-500/20",
+    MISSED: "bg-muted text-muted-foreground",
+  };
+  return (
+    <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${map[outcome] || map.MISSED}`} data-testid={`outcome-${outcome.toLowerCase()}`}>
+      {outcome}
     </span>
   );
 }

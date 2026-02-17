@@ -105,7 +105,10 @@ export const signals = pgTable(
     candleDatetimeUtc: timestamp("candle_datetime_utc", tz).notNull(),
     score: integer("score").notNull(),
     reasonJson: jsonb("reason_json"),
-    status: varchar("status", { length: 10 }).notNull().default("NEW"),
+    status: varchar("status", { length: 20 }).notNull().default("NEW"),
+    outcome: varchar("outcome", { length: 10 }),
+    outcomePrice: real("outcome_price"),
+    resolvedAt: timestamp("resolved_at", tz),
   },
   (table) => [
     uniqueIndex("signals_unique_idx").on(

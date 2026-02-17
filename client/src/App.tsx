@@ -12,12 +12,14 @@ import SignalsPage from "@/pages/signals";
 import InstrumentsPage from "@/pages/instruments";
 import SymbolView from "@/pages/symbol-view";
 import SettingsPage from "@/pages/settings";
+import BacktestPage from "@/pages/backtest";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={Dashboard} />
       <Route path="/signals" component={SignalsPage} />
+      <Route path="/backtest" component={BacktestPage} />
       <Route path="/instruments" component={InstrumentsPage} />
       <Route path="/instruments/:symbol" component={SymbolView} />
       <Route path="/settings" component={SettingsPage} />

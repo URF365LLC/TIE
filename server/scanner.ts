@@ -66,6 +66,15 @@ function scheduleNextTick(): void {
 }
 
 async function tick(): Promise<void> {
+  try {
+    const expiredCount = await expireOldSignals();
+    if (expiredCount > 0) {
+      log(`Auto-expired ${expiredCount} signal(s) older than 1 hour`, "scanner");
+    }
+  } catch (err: any) {
+    log(`Error expiring signals: ${err.message}`, "scanner");
+  }
+
   const settings = await storage.getSettings();
   if (!settings.scanEnabled) return;
 
@@ -275,6 +284,54 @@ async function processInstrument(inst: Instrument): Promise<number> {
   await storage.upsertScanProgress({ instrumentId: inst.id, timeframe: "15m", lastProcessedBarUtc: latestClosedEntry.datetimeUtc });
 
   return signalCount;
+}
+
+const SIGNAL_MAX_AGE_MS = 60 * 60 * 1000;
+
+export async function resolveSignalOutcome(signalId: number, newStatus: string): Promise<void> {
+  const sig = await storage.getSignalById(signalId);
+  if (!sig) return;
+
+  const reason = (sig.reasonJson ?? {}) as Record<string, any>;
+  const outcome = await determineOutcomeFromCandles(sig, reason);
+  await storage.resolveSignal(signalId, newStatus, outcome.result, outcome.price);
+}
+
+export async function expireOldSignals(): Promise<number> {
+  const expired = await storage.getExpiredNewSignals(SIGNAL_MAX_AGE_MS);
+  let count = 0;
+  for (const sig of expired) {
+    const reason = (sig.reasonJson ?? {}) as Record<string, any>;
+    const outcome = await determineOutcomeFromCandles(sig, reason);
+    await storage.resolveSignal(sig.id, "EXPIRED", outcome.result, outcome.price);
+    count++;
+  }
+  return count;
+}
+
+async function determineOutcomeFromCandles(sig: { instrumentId: number; direction: string; detectedAt: Date | string; timeframe: string }, reason: Record<string, any>): Promise<{ result: string; price: number | null }> {
+  const tp = reason.takeProfit as number | undefined;
+  const sl = reason.stopLoss as number | undefined;
+  const entry = reason.entryPrice as number | undefined;
+  if (tp == null || sl == null || entry == null) return { result: "MISSED", price: null };
+
+  const detectedMs = new Date(sig.detectedAt).getTime();
+  const candlesAfter = await storage.getCandles(sig.instrumentId, sig.timeframe, 300);
+  const relevant = candlesAfter
+    .filter((c) => c.datetimeUtc.getTime() > detectedMs)
+    .sort((a, b) => a.datetimeUtc.getTime() - b.datetimeUtc.getTime());
+
+  for (const c of relevant) {
+    if (sig.direction === "LONG") {
+      if (c.low <= sl) return { result: "LOSS", price: sl };
+      if (c.high >= tp) return { result: "WIN", price: tp };
+    } else {
+      if (c.high >= sl) return { result: "LOSS", price: sl };
+      if (c.low <= tp) return { result: "WIN", price: tp };
+    }
+  }
+
+  return { result: "MISSED", price: null };
 }
 
 function sleep(ms: number): Promise<void> {

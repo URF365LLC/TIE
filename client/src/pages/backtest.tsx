@@ -1,0 +1,324 @@
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
+import { TrendingUp, TrendingDown, Trophy, XCircle, HelpCircle, Filter, X, BarChart3, Target, Percent } from "lucide-react";
+import { Link } from "wouter";
+import type { SignalWithInstrument } from "@shared/schema";
+
+interface BacktestStats {
+  total: number;
+  wins: number;
+  losses: number;
+  missed: number;
+  byStrategy: Record<string, { total: number; wins: number }>;
+  byDirection: Record<string, { total: number; wins: number }>;
+  takenWins: number;
+  takenTotal: number;
+}
+
+export default function BacktestPage() {
+  const [strategyFilter, setStrategyFilter] = useState<string>("all");
+  const [directionFilter, setDirectionFilter] = useState<string>("all");
+  const [outcomeFilter, setOutcomeFilter] = useState<string>("all");
+
+  const queryParams = new URLSearchParams();
+  if (strategyFilter !== "all") queryParams.set("strategy", strategyFilter);
+  if (directionFilter !== "all") queryParams.set("direction", directionFilter);
+  if (outcomeFilter !== "all") queryParams.set("outcome", outcomeFilter);
+  const qs = queryParams.toString();
+
+  const { data: stats, isLoading: statsLoading } = useQuery<BacktestStats>({
+    queryKey: ["/api/backtest/stats"],
+    refetchInterval: 30000,
+  });
+
+  const { data: signals, isLoading: signalsLoading } = useQuery<SignalWithInstrument[]>({
+    queryKey: ["/api/backtest/signals", qs ? `?${qs}` : ""],
+    refetchInterval: 30000,
+  });
+
+  const hasFilters = strategyFilter !== "all" || directionFilter !== "all" || outcomeFilter !== "all";
+  const winRate = stats && stats.total > 0 ? ((stats.wins / stats.total) * 100).toFixed(1) : "—";
+  const takenWinRate = stats && stats.takenTotal > 0 ? ((stats.takenWins / stats.takenTotal) * 100).toFixed(1) : "—";
+
+  return (
+    <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto">
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight" data-testid="text-backtest-title">Backtest</h1>
+        <p className="text-sm text-muted-foreground mt-1">Strategy performance analysis on archived signals</p>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <StatCard
+          title="Win Rate"
+          value={statsLoading ? undefined : `${winRate}%`}
+          subtitle={stats ? `${stats.wins}W / ${stats.losses}L / ${stats.missed}M` : ""}
+          icon={<Percent className="w-4 h-4" />}
+          loading={statsLoading}
+          highlight={stats ? stats.wins > stats.losses : false}
+        />
+        <StatCard
+          title="Total Signals"
+          value={statsLoading ? undefined : String(stats?.total ?? 0)}
+          subtitle="archived"
+          icon={<BarChart3 className="w-4 h-4" />}
+          loading={statsLoading}
+        />
+        <StatCard
+          title="Your Win Rate"
+          value={statsLoading ? undefined : `${takenWinRate}%`}
+          subtitle={stats ? `${stats.takenWins}W / ${stats.takenTotal} taken` : ""}
+          icon={<Target className="w-4 h-4" />}
+          loading={statsLoading}
+          highlight={stats ? stats.takenWins > 0 : false}
+        />
+        <StatCard
+          title="Strategies"
+          value={statsLoading ? undefined : String(Object.keys(stats?.byStrategy ?? {}).length)}
+          subtitle="tracked"
+          icon={<Trophy className="w-4 h-4" />}
+          loading={statsLoading}
+        />
+      </div>
+
+      {stats && Object.keys(stats.byStrategy).length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {Object.entries(stats.byStrategy).map(([strat, data]) => {
+            const wr = data.total > 0 ? ((data.wins / data.total) * 100).toFixed(1) : "0";
+            return (
+              <Card key={strat} data-testid={`strategy-card-${strat.toLowerCase()}`}>
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
+                      {strat.replace(/_/g, " ")}
+                    </span>
+                  </div>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-2xl font-bold">{wr}%</span>
+                    <span className="text-xs text-muted-foreground">win rate</span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-2">
+                    <ProgressBar value={parseFloat(wr)} />
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">{data.wins}/{data.total}</span>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+          {Object.entries(stats.byDirection).map(([dir, data]) => {
+            const wr = data.total > 0 ? ((data.wins / data.total) * 100).toFixed(1) : "0";
+            return (
+              <Card key={dir} data-testid={`direction-card-${dir.toLowerCase()}`}>
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">{dir}</span>
+                    {dir === "LONG" ? <TrendingUp className="w-4 h-4 text-emerald-500" /> : <TrendingDown className="w-4 h-4 text-red-500" />}
+                  </div>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-2xl font-bold">{wr}%</span>
+                    <span className="text-xs text-muted-foreground">win rate</span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-2">
+                    <ProgressBar value={parseFloat(wr)} />
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">{data.wins}/{data.total}</span>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2">
+              <Filter className="w-4 h-4 text-muted-foreground" />
+              <CardTitle className="text-base font-medium">Archived Signals</CardTitle>
+            </div>
+            {hasFilters && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => { setStrategyFilter("all"); setDirectionFilter("all"); setOutcomeFilter("all"); }}
+                data-testid="button-clear-backtest-filters"
+              >
+                <X className="w-3 h-3 mr-1" /> Clear
+              </Button>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent className="pb-3">
+          <div className="flex flex-wrap gap-3">
+            <Select value={strategyFilter} onValueChange={setStrategyFilter}>
+              <SelectTrigger className="w-[180px]" data-testid="select-backtest-strategy">
+                <SelectValue placeholder="Strategy" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Strategies</SelectItem>
+                <SelectItem value="TREND_CONTINUATION">Trend Continuation</SelectItem>
+                <SelectItem value="RANGE_BREAKOUT">Range Breakout</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={directionFilter} onValueChange={setDirectionFilter}>
+              <SelectTrigger className="w-[140px]" data-testid="select-backtest-direction">
+                <SelectValue placeholder="Direction" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Directions</SelectItem>
+                <SelectItem value="LONG">Long</SelectItem>
+                <SelectItem value="SHORT">Short</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={outcomeFilter} onValueChange={setOutcomeFilter}>
+              <SelectTrigger className="w-[140px]" data-testid="select-backtest-outcome">
+                <SelectValue placeholder="Outcome" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Outcomes</SelectItem>
+                <SelectItem value="WIN">Win</SelectItem>
+                <SelectItem value="LOSS">Loss</SelectItem>
+                <SelectItem value="MISSED">Missed</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="p-0">
+          {signalsLoading ? (
+            <div className="p-4 space-y-3">
+              {[1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-14 w-full" />)}
+            </div>
+          ) : !signals?.length ? (
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+              <BarChart3 className="w-10 h-10 text-muted-foreground mb-3" />
+              <p className="text-sm text-muted-foreground">No archived signals yet</p>
+              <p className="text-xs text-muted-foreground mt-1">Signals are archived after 1 hour or when you mark them as Taken / Not Taken</p>
+            </div>
+          ) : (
+            <div className="divide-y">
+              {signals.map((sig) => {
+                const reason = (sig.reasonJson ?? {}) as Record<string, any>;
+                const hasLevels = reason.entryPrice != null;
+                return (
+                  <div key={sig.id} className="flex items-center justify-between p-4 gap-3" data-testid={`backtest-row-${sig.id}`}>
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className={`flex items-center justify-center w-9 h-9 rounded-md shrink-0 ${sig.direction === "LONG" ? "bg-emerald-500/10 text-emerald-500 dark:bg-emerald-500/20" : "bg-red-500/10 text-red-500 dark:bg-red-500/20"}`}>
+                        {sig.direction === "LONG" ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Link href={`/instruments/${sig.instrument.canonicalSymbol}`}>
+                            <span className="text-sm font-semibold hover:underline">{sig.instrument.canonicalSymbol}</span>
+                          </Link>
+                          <Badge variant="secondary" className="text-[10px]">{sig.strategy.replace(/_/g, " ")}</Badge>
+                          <Badge
+                            variant="outline"
+                            className={`text-[10px] ${sig.status === "TAKEN" ? "border-emerald-500/50 text-emerald-500" : sig.status === "NOT_TAKEN" ? "border-muted-foreground/50" : ""}`}
+                          >
+                            {sig.status.replace(/_/g, " ")}
+                          </Badge>
+                        </div>
+                        <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground flex-wrap">
+                          <span>{sig.timeframe}</span>
+                          <span>{new Date(sig.detectedAt).toLocaleString()}</span>
+                          {hasLevels && (
+                            <span className="hidden sm:inline">
+                              Entry {formatPrice(reason.entryPrice)} · <span className="text-red-400">SL {formatPrice(reason.stopLoss)}</span> · <span className="text-emerald-400">TP {formatPrice(reason.takeProfit)}</span>
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <ScoreBadge score={sig.score} />
+                      <OutcomeBadge outcome={sig.outcome ?? "MISSED"} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function formatPrice(value: number | string | undefined): string {
+  if (value == null) return "\u2014";
+  const num = typeof value === "string" ? parseFloat(value) : value;
+  if (isNaN(num)) return "\u2014";
+  if (Math.abs(num) >= 100) return num.toFixed(2);
+  if (Math.abs(num) >= 1) return num.toFixed(4);
+  return num.toFixed(5);
+}
+
+function StatCard({ title, value, subtitle, icon, loading, highlight }: {
+  title: string;
+  value: string | undefined;
+  subtitle: string;
+  icon: React.ReactNode;
+  loading: boolean;
+  highlight?: boolean;
+}) {
+  return (
+    <Card data-testid={`stat-card-${title.toLowerCase().replace(/\s/g, "-")}`}>
+      <CardContent className="p-4">
+        <div className="flex items-center justify-between gap-1 mb-2">
+          <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">{title}</span>
+          <div className="text-muted-foreground">{icon}</div>
+        </div>
+        {loading ? (
+          <Skeleton className="h-7 w-20" />
+        ) : (
+          <div className={`text-2xl font-bold tracking-tight ${highlight ? "text-emerald-500" : ""}`}>{value}</div>
+        )}
+        <p className="text-xs text-muted-foreground mt-1">{subtitle}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ProgressBar({ value }: { value: number }) {
+  const clampedValue = Math.min(100, Math.max(0, value));
+  const color = clampedValue >= 60 ? "bg-emerald-500" : clampedValue >= 40 ? "bg-amber-500" : "bg-red-500";
+  return (
+    <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
+      <div className={`h-full rounded-full ${color}`} style={{ width: `${clampedValue}%` }} />
+    </div>
+  );
+}
+
+function OutcomeBadge({ outcome }: { outcome: string }) {
+  const config: Record<string, { color: string; icon: React.ReactNode }> = {
+    WIN: { color: "bg-emerald-500/10 text-emerald-500 dark:bg-emerald-500/20", icon: <Trophy className="w-3 h-3" /> },
+    LOSS: { color: "bg-red-500/10 text-red-500 dark:bg-red-500/20", icon: <XCircle className="w-3 h-3" /> },
+    MISSED: { color: "bg-muted text-muted-foreground", icon: <HelpCircle className="w-3 h-3" /> },
+  };
+  const c = config[outcome] || config.MISSED;
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium ${c.color}`} data-testid={`outcome-badge-${outcome.toLowerCase()}`}>
+      {c.icon}
+      {outcome}
+    </span>
+  );
+}
+
+function ScoreBadge({ score }: { score: number }) {
+  let color = "bg-muted text-muted-foreground";
+  if (score >= 70) color = "bg-emerald-500/10 text-emerald-500 dark:bg-emerald-500/20";
+  else if (score >= 50) color = "bg-amber-500/10 text-amber-500 dark:bg-amber-500/20";
+  else color = "bg-red-500/10 text-red-500 dark:bg-red-500/20";
+  return (
+    <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${color}`}>
+      {score}
+    </span>
+  );
+}

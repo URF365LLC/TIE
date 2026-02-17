@@ -124,6 +124,37 @@ export async function registerRoutes(
     res.json(settings);
   });
 
+  app.post("/api/signals/:id/action", async (req, res) => {
+    const id = parseInt(req.params.id);
+    const { action } = req.body;
+    if (!["TAKEN", "NOT_TAKEN"].includes(action)) {
+      return res.status(400).json({ message: "action must be TAKEN or NOT_TAKEN" });
+    }
+    try {
+      const { resolveSignalOutcome } = await import("./scanner");
+      await resolveSignalOutcome(id, action);
+      res.json({ message: "Signal updated" });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.get("/api/backtest/signals", async (req, res) => {
+    const filters: any = {};
+    if (req.query.strategy) filters.strategy = req.query.strategy;
+    if (req.query.direction) filters.direction = req.query.direction;
+    if (req.query.outcome) filters.outcome = req.query.outcome;
+    if (req.query.symbol) filters.symbol = req.query.symbol;
+    if (req.query.limit) filters.limit = parseInt(req.query.limit as string);
+    const signals = await storage.getArchivedSignals(filters);
+    res.json(signals);
+  });
+
+  app.get("/api/backtest/stats", async (_req, res) => {
+    const stats = await storage.getBacktestStats();
+    res.json(stats);
+  });
+
   app.get("/api/dashboard/stats", async (_req, res) => {
     const stats = await storage.getDashboardStats();
     res.json(stats);

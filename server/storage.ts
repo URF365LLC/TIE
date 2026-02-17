@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, sql, ne, lt, inArray } from "drizzle-orm";
 import {
   instruments,
   candles,
@@ -48,10 +48,15 @@ export interface IStorage {
   getScanProgress(instrumentId: number, timeframe: string): Promise<ScanProgress | undefined>;
   upsertScanProgress(data: InsertScanProgress): Promise<void>;
 
+  getSignalById(id: number): Promise<SignalWithInstrument | undefined>;
   getSignals(filters?: { strategy?: string; direction?: string; status?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]>;
+  getArchivedSignals(filters?: { strategy?: string; direction?: string; outcome?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]>;
   findActiveSignal(instrumentId: number, timeframe: string, strategy: string, direction: string): Promise<Signal | undefined>;
+  getExpiredNewSignals(maxAgeMs: number): Promise<Signal[]>;
   upsertSignal(data: InsertSignal): Promise<Signal>;
   updateSignalStatus(id: number, status: string): Promise<void>;
+  resolveSignal(id: number, status: string, outcome: string, outcomePrice: number | null): Promise<void>;
+  getBacktestStats(): Promise<{ total: number; wins: number; losses: number; missed: number; byStrategy: Record<string, { total: number; wins: number }>; byDirection: Record<string, { total: number; wins: number }>;  takenWins: number; takenTotal: number }>;
 
   createAlertEvent(data: InsertAlertEvent): Promise<AlertEvent>;
 
@@ -202,6 +207,17 @@ export class DatabaseStorage implements IStorage {
       });
   }
 
+  async getSignalById(id: number): Promise<SignalWithInstrument | undefined> {
+    const rows = await db
+      .select()
+      .from(signals)
+      .innerJoin(instruments, eq(signals.instrumentId, instruments.id))
+      .where(eq(signals.id, id))
+      .limit(1);
+    if (!rows.length) return undefined;
+    return { ...rows[0].signals, instrument: rows[0].instruments };
+  }
+
   async getSignals(filters?: { strategy?: string; direction?: string; status?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]> {
     const conditions = [];
     if (filters?.strategy) conditions.push(eq(signals.strategy, filters.strategy));
@@ -255,6 +271,78 @@ export class DatabaseStorage implements IStorage {
 
   async updateSignalStatus(id: number, status: string): Promise<void> {
     await db.update(signals).set({ status }).where(eq(signals.id, id));
+  }
+
+  async resolveSignal(id: number, status: string, outcome: string, outcomePrice: number | null): Promise<void> {
+    await db.update(signals).set({ status, outcome, outcomePrice, resolvedAt: new Date() }).where(eq(signals.id, id));
+  }
+
+  async getExpiredNewSignals(maxAgeMs: number): Promise<Signal[]> {
+    const cutoff = new Date(Date.now() - maxAgeMs);
+    return db
+      .select()
+      .from(signals)
+      .where(and(eq(signals.status, "NEW"), lt(signals.detectedAt, cutoff)));
+  }
+
+  async getArchivedSignals(filters?: { strategy?: string; direction?: string; outcome?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]> {
+    const archivedStatuses = ["EXPIRED", "TAKEN", "NOT_TAKEN"];
+    const conditions = [inArray(signals.status, archivedStatuses)];
+    if (filters?.strategy) conditions.push(eq(signals.strategy, filters.strategy));
+    if (filters?.direction) conditions.push(eq(signals.direction, filters.direction));
+    if (filters?.outcome) conditions.push(eq(signals.outcome!, filters.outcome));
+    if (filters?.symbol) {
+      const inst = await this.getInstrumentBySymbol(filters.symbol);
+      if (inst) conditions.push(eq(signals.instrumentId, inst.id));
+      else return [];
+    }
+
+    const rows = await db
+      .select()
+      .from(signals)
+      .innerJoin(instruments, eq(signals.instrumentId, instruments.id))
+      .where(and(...conditions))
+      .orderBy(desc(signals.resolvedAt))
+      .limit(filters?.limit ?? 200);
+
+    return rows.map((r) => ({ ...r.signals, instrument: r.instruments }));
+  }
+
+  async getBacktestStats() {
+    const archivedStatuses = ["EXPIRED", "TAKEN", "NOT_TAKEN"];
+    const rows = await db
+      .select()
+      .from(signals)
+      .where(inArray(signals.status, archivedStatuses));
+
+    let total = 0, wins = 0, losses = 0, missed = 0;
+    let takenTotal = 0, takenWins = 0;
+    const byStrategy: Record<string, { total: number; wins: number }> = {};
+    const byDirection: Record<string, { total: number; wins: number }> = {};
+
+    for (const r of rows) {
+      total++;
+      if (r.outcome === "WIN") wins++;
+      else if (r.outcome === "LOSS") losses++;
+      else missed++;
+
+      if (r.status === "TAKEN") {
+        takenTotal++;
+        if (r.outcome === "WIN") takenWins++;
+      }
+
+      const strat = r.strategy;
+      if (!byStrategy[strat]) byStrategy[strat] = { total: 0, wins: 0 };
+      byStrategy[strat].total++;
+      if (r.outcome === "WIN") byStrategy[strat].wins++;
+
+      const dir = r.direction;
+      if (!byDirection[dir]) byDirection[dir] = { total: 0, wins: 0 };
+      byDirection[dir].total++;
+      if (r.outcome === "WIN") byDirection[dir].wins++;
+    }
+
+    return { total, wins, losses, missed, byStrategy, byDirection, takenWins, takenTotal };
   }
 
   async createAlertEvent(data: InsertAlertEvent): Promise<AlertEvent> {

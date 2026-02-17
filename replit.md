@@ -26,6 +26,7 @@ Analysis-only trading intelligence platform that scans markets using Twelve Data
 - `/signals` - Signal table with filters
 - `/instruments` - Instrument whitelist by asset class
 - `/instruments/:symbol` - Symbol detail with chart + indicators
+- `/backtest` - Backtest statistics and archived signal outcomes
 - `/settings` - Scanner and email configuration
 
 ## API Routes
@@ -34,9 +35,12 @@ Analysis-only trading intelligence platform that scans markets using Twelve Data
 - `GET /api/candles?symbol=X&tf=15m` - Get candles
 - `GET /api/indicators?symbol=X&tf=15m` - Get indicators
 - `GET /api/signals?strategy=X&direction=X&status=X&symbol=X` - Get signals
+- `POST /api/signals/:id/action` - Mark signal TAKEN/NOT_TAKEN (body: { action })
 - `POST /api/scan/run` - Trigger manual scan
 - `GET /api/scan/status` - Scanner status
 - `GET /api/scan/runs` - Recent scan runs
+- `GET /api/backtest/signals?strategy=X&direction=X&outcome=X` - Archived signals
+- `GET /api/backtest/stats` - Backtest statistics (win rates, by strategy/direction)
 - `GET /api/settings` - Get settings
 - `POST /api/settings` - Update settings
 - `GET /api/dashboard/stats` - Dashboard statistics
