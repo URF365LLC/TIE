@@ -145,6 +145,7 @@ export const settings = pgTable("settings", {
   alertCooldownMinutes: integer("alert_cooldown_minutes").notNull().default(60),
   accountBalance: integer("account_balance").notNull().default(50000),
   riskPercent: real("risk_percent").notNull().default(1.0),
+  signalEvalWindowHours: integer("signal_eval_window_hours").notNull().default(4),
 });
 
 export const tradeAnalyses = pgTable("trade_analyses", {

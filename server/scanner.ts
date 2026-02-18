@@ -66,16 +66,27 @@ function scheduleNextTick(): void {
 }
 
 async function tick(): Promise<void> {
+  const settings = await storage.getSettings();
+
   try {
-    const expiredCount = await expireOldSignals();
+    const resolvedCount = await resolveActiveSignals();
+    if (resolvedCount > 0) {
+      log(`Real-time resolved ${resolvedCount} signal(s) (TP/SL hit)`, "scanner");
+    }
+  } catch (err: any) {
+    log(`Error resolving active signals: ${err.message}`, "scanner");
+  }
+
+  try {
+    const evalWindowMs = (settings.signalEvalWindowHours ?? 4) * 60 * 60 * 1000;
+    const expiredCount = await expireOldSignals(evalWindowMs);
     if (expiredCount > 0) {
-      log(`Auto-expired ${expiredCount} signal(s) older than 1 hour`, "scanner");
+      log(`Expired ${expiredCount} stalled signal(s) past ${settings.signalEvalWindowHours ?? 4}h window as MISSED`, "scanner");
     }
   } catch (err: any) {
     log(`Error expiring signals: ${err.message}`, "scanner");
   }
 
-  const settings = await storage.getSettings();
   if (!settings.scanEnabled) return;
 
   if (!isScanning) {
@@ -286,8 +297,6 @@ async function processInstrument(inst: Instrument): Promise<number> {
   return signalCount;
 }
 
-const SIGNAL_MAX_AGE_MS = 60 * 60 * 1000;
-
 export async function resolveSignalOutcome(signalId: number, newStatus: string): Promise<void> {
   const sig = await storage.getSignalById(signalId);
   if (!sig) return;
@@ -297,8 +306,23 @@ export async function resolveSignalOutcome(signalId: number, newStatus: string):
   await storage.resolveSignal(signalId, newStatus, outcome.result, outcome.price);
 }
 
-export async function expireOldSignals(): Promise<number> {
-  const expired = await storage.getExpiredNewSignals(SIGNAL_MAX_AGE_MS);
+export async function resolveActiveSignals(): Promise<number> {
+  const activeSignals = await storage.getExpiredNewSignals(0);
+  let resolved = 0;
+  for (const sig of activeSignals) {
+    const reason = (sig.reasonJson ?? {}) as Record<string, any>;
+    const outcome = await determineOutcomeFromCandles(sig, reason);
+    if (outcome.result === "WIN" || outcome.result === "LOSS") {
+      await storage.resolveSignal(sig.id, "EXPIRED", outcome.result, outcome.price);
+      resolved++;
+    }
+  }
+  return resolved;
+}
+
+export async function expireOldSignals(evalWindowMs?: number): Promise<number> {
+  const windowMs = evalWindowMs ?? 4 * 60 * 60 * 1000;
+  const expired = await storage.getExpiredNewSignals(windowMs);
   let count = 0;
   for (const sig of expired) {
     const reason = (sig.reasonJson ?? {}) as Record<string, any>;

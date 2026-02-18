@@ -31,6 +31,7 @@ export default function SettingsPage() {
     alertCooldownMinutes: 60,
     accountBalance: 50000,
     riskPercent: 1.0,
+    signalEvalWindowHours: 4,
   });
 
   useEffect(() => {
@@ -46,6 +47,7 @@ export default function SettingsPage() {
         alertCooldownMinutes: settings.alertCooldownMinutes,
         accountBalance: settings.accountBalance,
         riskPercent: settings.riskPercent,
+        signalEvalWindowHours: settings.signalEvalWindowHours ?? 4,
       });
     }
   }, [settings]);
@@ -143,6 +145,26 @@ export default function SettingsPage() {
                 data-testid="input-burst-sleep"
               />
               <p className="text-[11px] text-muted-foreground">Delay between burst cycles in milliseconds</p>
+            </div>
+            <div className="space-y-2">
+              <Label className="text-sm">Signal Evaluation Window (hours)</Label>
+              <Select
+                value={String(form.signalEvalWindowHours)}
+                onValueChange={(v) => setForm({ ...form, signalEvalWindowHours: parseInt(v) })}
+              >
+                <SelectTrigger data-testid="select-eval-window">
+                  <SelectValue placeholder="Eval window" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="2">2 hours</SelectItem>
+                  <SelectItem value="3">3 hours</SelectItem>
+                  <SelectItem value="4">4 hours</SelectItem>
+                  <SelectItem value="6">6 hours</SelectItem>
+                  <SelectItem value="8">8 hours</SelectItem>
+                  <SelectItem value="12">12 hours</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground">Signals that don't hit TP/SL within this window are classified as MISSED (stalled)</p>
             </div>
           </div>
         </CardContent>

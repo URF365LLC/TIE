@@ -1,30 +1,26 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { TrendingUp, TrendingDown, Zap, Filter, X, ChevronDown, ChevronUp, Target, ShieldAlert, CircleDollarSign, Crosshair, Check, XCircle, Scale } from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TrendingUp, TrendingDown, Zap, Filter, X, ChevronDown, ChevronUp, Target, ShieldAlert, CircleDollarSign, Crosshair, Check, XCircle, Scale, Clock, Eye } from "lucide-react";
 import { Link } from "wouter";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { SignalWithInstrument, Settings } from "@shared/schema";
 
+const MONITORING_THRESHOLD_MS = 60 * 60 * 1000;
+
 export default function SignalsPage() {
+  const [activeTab, setActiveTab] = useState("active");
   const [strategyFilter, setStrategyFilter] = useState<string>("all");
   const [directionFilter, setDirectionFilter] = useState<string>("all");
-  const [statusFilter, setStatusFilter] = useState<string>("active");
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
-  const queryParams = new URLSearchParams();
-  if (strategyFilter !== "all") queryParams.set("strategy", strategyFilter);
-  if (directionFilter !== "all") queryParams.set("direction", directionFilter);
-  if (statusFilter === "active") queryParams.set("status", "active");
-  else if (statusFilter !== "all") queryParams.set("status", statusFilter);
-
-  const qs = queryParams.toString();
-  const { data: signals, isLoading } = useQuery<SignalWithInstrument[]>({
-    queryKey: ["/api/signals", qs ? `?${qs}` : ""],
+  const { data: allActiveSignals, isLoading } = useQuery<SignalWithInstrument[]>({
+    queryKey: ["/api/signals", "?status=active"],
     refetchInterval: 15000,
   });
 
@@ -42,7 +38,33 @@ export default function SignalsPage() {
     },
   });
 
-  const hasFilters = strategyFilter !== "all" || directionFilter !== "all" || statusFilter !== "active";
+  const { activeSignals, monitoringSignals } = useMemo(() => {
+    if (!allActiveSignals) return { activeSignals: [], monitoringSignals: [] };
+    const now = Date.now();
+    const active: SignalWithInstrument[] = [];
+    const monitoring: SignalWithInstrument[] = [];
+    for (const sig of allActiveSignals) {
+      const age = now - new Date(sig.detectedAt).getTime();
+      if (age > MONITORING_THRESHOLD_MS) {
+        monitoring.push(sig);
+      } else {
+        active.push(sig);
+      }
+    }
+    return { activeSignals: active, monitoringSignals: monitoring };
+  }, [allActiveSignals]);
+
+  const filterSignals = (list: SignalWithInstrument[]) => {
+    return list.filter((sig) => {
+      if (strategyFilter !== "all" && sig.strategy !== strategyFilter) return false;
+      if (directionFilter !== "all" && sig.direction !== directionFilter) return false;
+      return true;
+    });
+  };
+
+  const displaySignals = activeTab === "active" ? filterSignals(activeSignals) : filterSignals(monitoringSignals);
+  const hasFilters = strategyFilter !== "all" || directionFilter !== "all";
+  const evalWindow = settings?.signalEvalWindowHours ?? 4;
 
   return (
     <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto">
@@ -51,29 +73,28 @@ export default function SignalsPage() {
         <p className="text-sm text-muted-foreground mt-1">Trading setups detected by the scanner</p>
       </div>
 
-      <Card>
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <div className="flex items-center gap-2">
-              <Filter className="w-4 h-4 text-muted-foreground" />
-              <CardTitle className="text-base font-medium">Filters</CardTitle>
-            </div>
-            {hasFilters && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => { setStrategyFilter("all"); setDirectionFilter("all"); setStatusFilter("active"); }}
-                data-testid="button-clear-filters"
-              >
-                <X className="w-3 h-3 mr-1" /> Clear
-              </Button>
-            )}
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-3">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <TabsList data-testid="tabs-signal-view">
+            <TabsTrigger value="active" data-testid="tab-active" className="gap-1.5">
+              <Zap className="w-3.5 h-3.5" />
+              Active
+              {activeSignals.length > 0 && (
+                <Badge variant="secondary" className="text-[10px] ml-0.5">{activeSignals.length}</Badge>
+              )}
+            </TabsTrigger>
+            <TabsTrigger value="monitoring" data-testid="tab-monitoring" className="gap-1.5">
+              <Eye className="w-3.5 h-3.5" />
+              Monitoring
+              {monitoringSignals.length > 0 && (
+                <Badge variant="secondary" className="text-[10px] ml-0.5">{monitoringSignals.length}</Badge>
+              )}
+            </TabsTrigger>
+          </TabsList>
+
+          <div className="flex items-center gap-2 flex-wrap">
             <Select value={strategyFilter} onValueChange={setStrategyFilter}>
-              <SelectTrigger className="w-[180px]" data-testid="select-strategy-filter">
+              <SelectTrigger className="w-[170px]" data-testid="select-strategy-filter">
                 <SelectValue placeholder="Strategy" />
               </SelectTrigger>
               <SelectContent>
@@ -92,232 +113,291 @@ export default function SignalsPage() {
                 <SelectItem value="SHORT">Short</SelectItem>
               </SelectContent>
             </Select>
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-[140px]" data-testid="select-status-filter">
-                <SelectValue placeholder="Status" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="active">Active Only</SelectItem>
-                <SelectItem value="all">All Status</SelectItem>
-                <SelectItem value="NEW">New</SelectItem>
-                <SelectItem value="ALERTED">Alerted</SelectItem>
-                <SelectItem value="TAKEN">Taken</SelectItem>
-                <SelectItem value="NOT_TAKEN">Not Taken</SelectItem>
-                <SelectItem value="EXPIRED">Expired</SelectItem>
-              </SelectContent>
-            </Select>
+            {hasFilters && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => { setStrategyFilter("all"); setDirectionFilter("all"); }}
+                data-testid="button-clear-filters"
+              >
+                <X className="w-3 h-3 mr-1" /> Clear
+              </Button>
+            )}
           </div>
-        </CardContent>
-      </Card>
+        </div>
 
-      <Card>
-        <CardContent className="p-0">
-          {isLoading ? (
-            <div className="p-4 space-y-3">
-              {[1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-14 w-full" />)}
-            </div>
-          ) : !signals?.length ? (
-            <div className="flex flex-col items-center justify-center py-16 text-center">
-              <Zap className="w-10 h-10 text-muted-foreground mb-3" />
-              <p className="text-sm text-muted-foreground">No signals match your filters</p>
-              {hasFilters && (
-                <Button variant="ghost" size="sm" className="mt-2" onClick={() => { setStrategyFilter("all"); setDirectionFilter("all"); setStatusFilter("active"); }}>
-                  Clear filters
-                </Button>
+        <TabsContent value="active" className="mt-4">
+          <Card>
+            <CardContent className="p-0">
+              {isLoading ? (
+                <div className="p-4 space-y-3">
+                  {[1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-14 w-full" />)}
+                </div>
+              ) : !displaySignals.length ? (
+                <div className="flex flex-col items-center justify-center py-16 text-center">
+                  <Zap className="w-10 h-10 text-muted-foreground mb-3" />
+                  <p className="text-sm text-muted-foreground">No active signals right now</p>
+                  <p className="text-xs text-muted-foreground mt-1">New signals appear here as the scanner detects setups</p>
+                </div>
+              ) : (
+                <SignalList
+                  signals={displaySignals}
+                  expandedId={expandedId}
+                  setExpandedId={setExpandedId}
+                  actionMutation={actionMutation}
+                  settings={settings}
+                />
               )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="monitoring" className="mt-4 space-y-4">
+          <div className="rounded-md bg-muted/50 p-3 flex items-start gap-2">
+            <Clock className="w-4 h-4 text-muted-foreground mt-0.5 shrink-0" />
+            <div>
+              <p className="text-xs font-medium">Signals being monitored for TP/SL resolution</p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                These signals are older than 1 hour and haven't hit their Take Profit or Stop Loss yet. 
+                The scanner continues checking each tick. Signals that don't resolve within the {evalWindow}-hour evaluation window will be classified as MISSED (stalled momentum).
+              </p>
             </div>
-          ) : (
-            <div className="divide-y">
-              {signals.map((sig) => {
-                const reason = (sig.reasonJson ?? {}) as Record<string, any>;
-                const isExpanded = expandedId === sig.id;
-                const hasLevels = reason.entryPrice != null;
+          </div>
+          <Card>
+            <CardContent className="p-0">
+              {isLoading ? (
+                <div className="p-4 space-y-3">
+                  {[1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-14 w-full" />)}
+                </div>
+              ) : !displaySignals.length ? (
+                <div className="flex flex-col items-center justify-center py-16 text-center">
+                  <Eye className="w-10 h-10 text-muted-foreground mb-3" />
+                  <p className="text-sm text-muted-foreground">No signals currently being monitored</p>
+                  <p className="text-xs text-muted-foreground mt-1">Signals that haven't resolved within 1 hour will appear here for tracking</p>
+                </div>
+              ) : (
+                <SignalList
+                  signals={displaySignals}
+                  expandedId={expandedId}
+                  setExpandedId={setExpandedId}
+                  actionMutation={actionMutation}
+                  settings={settings}
+                  showAge
+                />
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
 
-                return (
-                  <div key={sig.id} data-testid={`signal-row-${sig.id}`}>
-                    <div
-                      className="flex items-center justify-between p-4 cursor-pointer hover-elevate"
-                      onClick={() => setExpandedId(isExpanded ? null : sig.id)}
-                      data-testid={`signal-toggle-${sig.id}`}
+function SignalList({ signals, expandedId, setExpandedId, actionMutation, settings, showAge }: {
+  signals: SignalWithInstrument[];
+  expandedId: number | null;
+  setExpandedId: (id: number | null) => void;
+  actionMutation: any;
+  settings?: Settings;
+  showAge?: boolean;
+}) {
+  return (
+    <div className="divide-y">
+      {signals.map((sig) => {
+        const reason = (sig.reasonJson ?? {}) as Record<string, any>;
+        const isExpanded = expandedId === sig.id;
+        const hasLevels = reason.entryPrice != null;
+        const ageMs = Date.now() - new Date(sig.detectedAt).getTime();
+        const ageHours = Math.floor(ageMs / (60 * 60 * 1000));
+        const ageMinutes = Math.floor((ageMs % (60 * 60 * 1000)) / (60 * 1000));
+
+        return (
+          <div key={sig.id} data-testid={`signal-row-${sig.id}`}>
+            <div
+              className="flex items-center justify-between p-4 cursor-pointer hover-elevate"
+              onClick={() => setExpandedId(isExpanded ? null : sig.id)}
+              data-testid={`signal-toggle-${sig.id}`}
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <div className={`flex items-center justify-center w-9 h-9 rounded-md shrink-0 ${sig.direction === "LONG" ? "bg-emerald-500/10 text-emerald-500 dark:bg-emerald-500/20" : "bg-red-500/10 text-red-500 dark:bg-red-500/20"}`}>
+                  {sig.direction === "LONG" ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Link href={`/instruments/${sig.instrument.canonicalSymbol}`}>
+                      <span className="text-sm font-semibold hover:underline" data-testid={`link-symbol-${sig.instrument.canonicalSymbol}`}>
+                        {sig.instrument.canonicalSymbol}
+                      </span>
+                    </Link>
+                    <Badge variant="secondary" className="text-[10px]">
+                      {sig.strategy.replace(/_/g, " ")}
+                    </Badge>
+                    <Badge
+                      variant={sig.status === "NEW" ? "default" : sig.status === "TAKEN" ? "default" : sig.status === "ALERTED" ? "secondary" : "outline"}
+                      className={`text-[10px] ${sig.status === "TAKEN" ? "bg-emerald-500/80" : sig.status === "EXPIRED" ? "bg-muted" : ""}`}
                     >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className={`flex items-center justify-center w-9 h-9 rounded-md shrink-0 ${sig.direction === "LONG" ? "bg-emerald-500/10 text-emerald-500 dark:bg-emerald-500/20" : "bg-red-500/10 text-red-500 dark:bg-red-500/20"}`}>
-                          {sig.direction === "LONG" ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                        </div>
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <Link href={`/instruments/${sig.instrument.canonicalSymbol}`}>
-                              <span className="text-sm font-semibold hover:underline" data-testid={`link-symbol-${sig.instrument.canonicalSymbol}`}>
-                                {sig.instrument.canonicalSymbol}
-                              </span>
-                            </Link>
-                            <Badge variant="secondary" className="text-[10px]">
-                              {sig.strategy.replace(/_/g, " ")}
-                            </Badge>
-                            <Badge
-                              variant={sig.status === "NEW" ? "default" : sig.status === "TAKEN" ? "default" : sig.status === "ALERTED" ? "secondary" : "outline"}
-                              className={`text-[10px] ${sig.status === "TAKEN" ? "bg-emerald-500/80" : sig.status === "EXPIRED" ? "bg-muted" : ""}`}
-                            >
-                              {sig.status.replace(/_/g, " ")}
-                            </Badge>
-                          </div>
-                          <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground flex-wrap">
-                            <span>{sig.timeframe}</span>
-                            <span>{new Date(sig.detectedAt).toLocaleString()}</span>
-                            {hasLevels && (
-                              <span className="hidden sm:inline">
-                                Entry: {formatPrice(reason.entryPrice)}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        {hasLevels && (
-                          <div className="hidden md:flex items-center gap-3 mr-3 text-xs">
-                            <span className="text-red-400">SL {formatPrice(reason.stopLoss)}</span>
-                            <span className="text-emerald-400">TP {formatPrice(reason.takeProfit)}</span>
-                          </div>
-                        )}
-                        <ScoreBadge score={sig.score} />
-                        <Badge variant={sig.direction === "LONG" ? "default" : "destructive"} className="text-[10px]">
-                          {sig.direction}
-                        </Badge>
-                        {isExpanded ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
-                      </div>
-                    </div>
-
-                    {isExpanded && (
-                      <div className="px-4 pb-4" data-testid={`signal-detail-${sig.id}`}>
-                        <div className="rounded-md border p-4 space-y-4 bg-muted/30">
-                          {hasLevels && (
-                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                              <LevelCard
-                                icon={<Crosshair className="w-3.5 h-3.5" />}
-                                label="Entry Price"
-                                value={formatPrice(reason.entryPrice)}
-                                color="text-foreground"
-                              />
-                              <LevelCard
-                                icon={<ShieldAlert className="w-3.5 h-3.5" />}
-                                label="Stop Loss"
-                                value={formatPrice(reason.stopLoss)}
-                                color="text-red-400"
-                              />
-                              <LevelCard
-                                icon={<Target className="w-3.5 h-3.5" />}
-                                label="Take Profit"
-                                value={formatPrice(reason.takeProfit)}
-                                color="text-emerald-400"
-                              />
-                              <LevelCard
-                                icon={<CircleDollarSign className="w-3.5 h-3.5" />}
-                                label="Risk : Reward"
-                                value={reason.riskRewardRatio || "—"}
-                                color="text-foreground"
-                              />
-                            </div>
-                          )}
-
-                          {hasLevels && settings && reason.stopDistance != null && reason.stopDistance > 0 && (
-                            <PositionSizeCard
-                              accountBalance={settings.accountBalance}
-                              riskPercent={settings.riskPercent}
-                              stopDistance={reason.stopDistance}
-                              entryPrice={reason.entryPrice}
-                              assetClass={sig.instrument.assetClass}
-                            />
-                          )}
-
-                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-2 text-xs">
-                            {reason.atr != null && (
-                              <DetailItem label="ATR" value={formatPrice(reason.atr)} />
-                            )}
-                            {reason.stopDistance != null && (
-                              <DetailItem label="Stop Distance" value={formatPrice(reason.stopDistance)} />
-                            )}
-                            {reason.adx != null && (
-                              <DetailItem label="ADX" value={String(reason.adx)} />
-                            )}
-                            {reason.ema21Zone != null && (
-                              <DetailItem label="EMA21 Zone" value={formatPrice(reason.ema21Zone)} />
-                            )}
-                            {reason.ema55Zone != null && (
-                              <DetailItem label="EMA55 Zone" value={formatPrice(reason.ema55Zone)} />
-                            )}
-                            {reason.rangeHigh != null && (
-                              <DetailItem label="Range High" value={formatPrice(reason.rangeHigh)} />
-                            )}
-                            {reason.rangeLow != null && (
-                              <DetailItem label="Range Low" value={formatPrice(reason.rangeLow)} />
-                            )}
-                            {reason.bbWidth != null && (
-                              <DetailItem label="BB Width" value={formatPrice(reason.bbWidth)} />
-                            )}
-                          </div>
-
-                          <div>
-                            <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-2">Signal Reasoning</p>
-                            <div className="flex flex-wrap gap-1.5">
-                              {reason.bias && <ReasonChip label="Bias" value={String(reason.bias)} />}
-                              {reason.emaStack && <ReasonChip label="EMA Stack" value={String(reason.emaStack)} />}
-                              {reason.pullback && <ReasonChip label="Pullback" value={String(reason.pullback)} />}
-                              {reason.macd && <ReasonChip label="MACD" value={String(reason.macd)} />}
-                              {reason.breakout && <ReasonChip label="Breakout" value={String(reason.breakout)} />}
-                            </div>
-                          </div>
-
-                          {sig.status === "NEW" && (
-                            <div className="flex items-center gap-2 pt-2 border-t">
-                              <span className="text-xs text-muted-foreground mr-auto">Mark this signal:</span>
-                              <Button
-                                size="sm"
-                                variant="default"
-                                disabled={actionMutation.isPending}
-                                onClick={(e) => { e.stopPropagation(); actionMutation.mutate({ id: sig.id, action: "TAKEN" }); }}
-                                data-testid={`button-taken-${sig.id}`}
-                              >
-                                <Check className="w-3 h-3 mr-1" /> Taken
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                disabled={actionMutation.isPending}
-                                onClick={(e) => { e.stopPropagation(); actionMutation.mutate({ id: sig.id, action: "NOT_TAKEN" }); }}
-                                data-testid={`button-not-taken-${sig.id}`}
-                              >
-                                <XCircle className="w-3 h-3 mr-1" /> Not Taken
-                              </Button>
-                            </div>
-                          )}
-
-                          {sig.outcome && (
-                            <div className="flex items-center gap-2 pt-2 border-t">
-                              <span className="text-xs text-muted-foreground">Outcome:</span>
-                              <OutcomeBadge outcome={sig.outcome} />
-                              {sig.outcomePrice != null && (
-                                <span className="text-xs text-muted-foreground">@ {formatPrice(sig.outcomePrice)}</span>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
+                      {sig.status.replace(/_/g, " ")}
+                    </Badge>
+                    {showAge && (
+                      <span className="text-[10px] text-amber-500 dark:text-amber-400 flex items-center gap-0.5">
+                        <Clock className="w-3 h-3" />
+                        {ageHours > 0 ? `${ageHours}h ${ageMinutes}m` : `${ageMinutes}m`}
+                      </span>
                     )}
                   </div>
-                );
-              })}
+                  <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground flex-wrap">
+                    <span>{sig.timeframe}</span>
+                    <span>{new Date(sig.detectedAt).toLocaleString()}</span>
+                    {hasLevels && (
+                      <span className="hidden sm:inline">
+                        Entry: {formatPrice(reason.entryPrice)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {hasLevels && (
+                  <div className="hidden md:flex items-center gap-3 mr-3 text-xs">
+                    <span className="text-red-400">SL {formatPrice(reason.stopLoss)}</span>
+                    <span className="text-emerald-400">TP {formatPrice(reason.takeProfit)}</span>
+                  </div>
+                )}
+                <ScoreBadge score={sig.score} />
+                <Badge variant={sig.direction === "LONG" ? "default" : "destructive"} className="text-[10px]">
+                  {sig.direction}
+                </Badge>
+                {isExpanded ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+              </div>
             </div>
-          )}
-        </CardContent>
-      </Card>
+
+            {isExpanded && (
+              <div className="px-4 pb-4" data-testid={`signal-detail-${sig.id}`}>
+                <div className="rounded-md border p-4 space-y-4 bg-muted/30">
+                  {hasLevels && (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <LevelCard
+                        icon={<Crosshair className="w-3.5 h-3.5" />}
+                        label="Entry Price"
+                        value={formatPrice(reason.entryPrice)}
+                        color="text-foreground"
+                      />
+                      <LevelCard
+                        icon={<ShieldAlert className="w-3.5 h-3.5" />}
+                        label="Stop Loss"
+                        value={formatPrice(reason.stopLoss)}
+                        color="text-red-400"
+                      />
+                      <LevelCard
+                        icon={<Target className="w-3.5 h-3.5" />}
+                        label="Take Profit"
+                        value={formatPrice(reason.takeProfit)}
+                        color="text-emerald-400"
+                      />
+                      <LevelCard
+                        icon={<CircleDollarSign className="w-3.5 h-3.5" />}
+                        label="Risk : Reward"
+                        value={reason.riskRewardRatio || "\u2014"}
+                        color="text-foreground"
+                      />
+                    </div>
+                  )}
+
+                  {hasLevels && settings && reason.stopDistance != null && reason.stopDistance > 0 && (
+                    <PositionSizeCard
+                      accountBalance={settings.accountBalance}
+                      riskPercent={settings.riskPercent}
+                      stopDistance={reason.stopDistance}
+                      entryPrice={reason.entryPrice}
+                      assetClass={sig.instrument.assetClass}
+                    />
+                  )}
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-2 text-xs">
+                    {reason.atr != null && (
+                      <DetailItem label="ATR" value={formatPrice(reason.atr)} />
+                    )}
+                    {reason.stopDistance != null && (
+                      <DetailItem label="Stop Distance" value={formatPrice(reason.stopDistance)} />
+                    )}
+                    {reason.adx != null && (
+                      <DetailItem label="ADX" value={String(reason.adx)} />
+                    )}
+                    {reason.ema21Zone != null && (
+                      <DetailItem label="EMA21 Zone" value={formatPrice(reason.ema21Zone)} />
+                    )}
+                    {reason.ema55Zone != null && (
+                      <DetailItem label="EMA55 Zone" value={formatPrice(reason.ema55Zone)} />
+                    )}
+                    {reason.rangeHigh != null && (
+                      <DetailItem label="Range High" value={formatPrice(reason.rangeHigh)} />
+                    )}
+                    {reason.rangeLow != null && (
+                      <DetailItem label="Range Low" value={formatPrice(reason.rangeLow)} />
+                    )}
+                    {reason.bbWidth != null && (
+                      <DetailItem label="BB Width" value={formatPrice(reason.bbWidth)} />
+                    )}
+                  </div>
+
+                  <div>
+                    <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-2">Signal Reasoning</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {reason.bias && <ReasonChip label="Bias" value={String(reason.bias)} />}
+                      {reason.emaStack && <ReasonChip label="EMA Stack" value={String(reason.emaStack)} />}
+                      {reason.pullback && <ReasonChip label="Pullback" value={String(reason.pullback)} />}
+                      {reason.macd && <ReasonChip label="MACD" value={String(reason.macd)} />}
+                      {reason.breakout && <ReasonChip label="Breakout" value={String(reason.breakout)} />}
+                    </div>
+                  </div>
+
+                  {sig.status === "NEW" && (
+                    <div className="flex items-center gap-2 pt-2 border-t">
+                      <span className="text-xs text-muted-foreground mr-auto">Mark this signal:</span>
+                      <Button
+                        size="sm"
+                        variant="default"
+                        disabled={actionMutation.isPending}
+                        onClick={(e) => { e.stopPropagation(); actionMutation.mutate({ id: sig.id, action: "TAKEN" }); }}
+                        data-testid={`button-taken-${sig.id}`}
+                      >
+                        <Check className="w-3 h-3 mr-1" /> Taken
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={actionMutation.isPending}
+                        onClick={(e) => { e.stopPropagation(); actionMutation.mutate({ id: sig.id, action: "NOT_TAKEN" }); }}
+                        data-testid={`button-not-taken-${sig.id}`}
+                      >
+                        <XCircle className="w-3 h-3 mr-1" /> Not Taken
+                      </Button>
+                    </div>
+                  )}
+
+                  {sig.outcome && (
+                    <div className="flex items-center gap-2 pt-2 border-t">
+                      <span className="text-xs text-muted-foreground">Outcome:</span>
+                      <OutcomeBadge outcome={sig.outcome} />
+                      {sig.outcomePrice != null && (
+                        <span className="text-xs text-muted-foreground">@ {formatPrice(sig.outcomePrice)}</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
 function formatPrice(value: number | string | undefined): string {
-  if (value == null) return "—";
+  if (value == null) return "\u2014";
   const num = typeof value === "string" ? parseFloat(value) : value;
-  if (isNaN(num)) return "—";
+  if (isNaN(num)) return "\u2014";
   if (Math.abs(num) >= 100) return num.toFixed(2);
   if (Math.abs(num) >= 1) return num.toFixed(4);
   return num.toFixed(5);
