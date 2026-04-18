@@ -7,6 +7,7 @@ import { TrendingUp, TrendingDown, ArrowLeft, CandlestickChart, Activity } from 
 import { Button } from "@/components/ui/button";
 import { Link } from "wouter";
 import type { Candle, Indicator, SignalWithInstrument, Instrument } from "@shared/schema";
+import { DeepDiveButton } from "@/components/signal-journal";
 import { useRef, useEffect } from "react";
 
 export default function SymbolView() {
@@ -117,6 +118,7 @@ export default function SymbolView() {
                     <div className="flex items-center gap-2">
                       <ScoreBadge score={sig.score} />
                       <Badge variant="secondary" className="text-[10px]">{sig.status}</Badge>
+                      <DeepDiveButton signalId={sig.id} size="sm" variant="ghost" />
                     </div>
                   </div>
                 ))}

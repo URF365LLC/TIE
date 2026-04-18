@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Download, BarChart3, Layers, ArrowUpDown, Globe, Clock, Calendar } from "lucide-react";
+import { Download, BarChart3, Layers, ArrowUpDown, Globe, Clock, Calendar, ArrowUp, ArrowDown } from "lucide-react";
 
 type GroupBy = "pair" | "strategy" | "direction" | "asset" | "session" | "hour";
 
@@ -56,12 +56,50 @@ export default function PerformancePage() {
   );
 }
 
+type SortKey = "key" | "total" | "wins" | "losses" | "missed" | "resolved" | "winRate";
+
 function PerformanceTable({ groupBy, label }: { groupBy: GroupBy; label: string }) {
   const { data, isLoading } = useQuery<{ groupBy: GroupBy; rows: AggregateRow[] }>({
     queryKey: ["/api/analytics/performance", `?groupBy=${groupBy}`],
   });
 
-  const rows = data?.rows ?? [];
+  const [sortKey, setSortKey] = useState<SortKey>("total");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  const baseRows = data?.rows ?? [];
+  const rows = [...baseRows].sort((a, b) => {
+    const ar = a.wins + a.losses;
+    const br = b.wins + b.losses;
+    const aw = ar > 0 ? a.wins / ar : -1;
+    const bw = br > 0 ? b.wins / br : -1;
+    let cmp = 0;
+    switch (sortKey) {
+      case "key": cmp = a.key.localeCompare(b.key); break;
+      case "total": cmp = a.total - b.total; break;
+      case "wins": cmp = a.wins - b.wins; break;
+      case "losses": cmp = a.losses - b.losses; break;
+      case "missed": cmp = a.missed - b.missed; break;
+      case "resolved": cmp = ar - br; break;
+      case "winRate": cmp = aw - bw; break;
+    }
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+
+  const toggleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
+    } else {
+      setSortKey(key);
+      setSortDir(key === "key" ? "asc" : "desc");
+    }
+  };
+
+  const SortIcon = ({ k }: { k: SortKey }) => {
+    if (sortKey !== k) return <ArrowUpDown className="w-3 h-3 inline ml-1 opacity-40" />;
+    return sortDir === "asc"
+      ? <ArrowUp className="w-3 h-3 inline ml-1" />
+      : <ArrowDown className="w-3 h-3 inline ml-1" />;
+  };
 
   const exportCsv = () => {
     const header = ["key", "total", "wins", "losses", "missed", "resolved", "win_rate_pct"];
@@ -110,13 +148,13 @@ function PerformanceTable({ groupBy, label }: { groupBy: GroupBy; label: string 
             <table className="w-full text-sm">
               <thead className="bg-muted/30 text-xs uppercase tracking-wider text-muted-foreground">
                 <tr>
-                  <th className="text-left px-4 py-2.5 font-medium">{label.replace(/^By /, "")}</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Total</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Wins</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Losses</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Missed</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Resolved</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Win Rate</th>
+                  <th className="text-left px-4 py-2.5 font-medium cursor-pointer select-none hover:text-foreground" onClick={() => toggleSort("key")} data-testid={`sort-key-${groupBy}`}>{label.replace(/^By /, "")}<SortIcon k="key" /></th>
+                  <th className="text-right px-4 py-2.5 font-medium cursor-pointer select-none hover:text-foreground" onClick={() => toggleSort("total")} data-testid={`sort-total-${groupBy}`}>Total<SortIcon k="total" /></th>
+                  <th className="text-right px-4 py-2.5 font-medium cursor-pointer select-none hover:text-foreground" onClick={() => toggleSort("wins")} data-testid={`sort-wins-${groupBy}`}>Wins<SortIcon k="wins" /></th>
+                  <th className="text-right px-4 py-2.5 font-medium cursor-pointer select-none hover:text-foreground" onClick={() => toggleSort("losses")} data-testid={`sort-losses-${groupBy}`}>Losses<SortIcon k="losses" /></th>
+                  <th className="text-right px-4 py-2.5 font-medium cursor-pointer select-none hover:text-foreground" onClick={() => toggleSort("missed")} data-testid={`sort-missed-${groupBy}`}>Missed<SortIcon k="missed" /></th>
+                  <th className="text-right px-4 py-2.5 font-medium cursor-pointer select-none hover:text-foreground" onClick={() => toggleSort("resolved")} data-testid={`sort-resolved-${groupBy}`}>Resolved<SortIcon k="resolved" /></th>
+                  <th className="text-right px-4 py-2.5 font-medium cursor-pointer select-none hover:text-foreground" onClick={() => toggleSort("winRate")} data-testid={`sort-winrate-${groupBy}`}>Win Rate<SortIcon k="winRate" /></th>
                   <th className="text-left px-4 py-2.5 font-medium w-32">Bar</th>
                 </tr>
               </thead>

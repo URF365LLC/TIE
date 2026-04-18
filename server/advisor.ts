@@ -84,33 +84,27 @@ export async function analyzePortfolio(): Promise<string> {
     };
   });
 
-  const byPair: Record<string, { wins: number; losses: number; missed: number }> = {};
-  const byAssetClass: Record<string, { wins: number; losses: number }> = {};
-  const byHour: Record<number, { wins: number; losses: number; total: number }> = {};
-  const byStrategy: Record<string, { wins: number; losses: number }> = {};
+  // Source of truth: shared SQL aggregates from getPerformanceAggregates
+  const [pairAgg, assetAgg, hourAgg, strategyAgg, sessionAgg] = await Promise.all([
+    storage.getPerformanceAggregates("pair"),
+    storage.getPerformanceAggregates("asset"),
+    storage.getPerformanceAggregates("hour"),
+    storage.getPerformanceAggregates("strategy"),
+    storage.getPerformanceAggregates("session"),
+  ]);
 
-  for (const s of archivedSignals) {
-    const sym = s.instrument.canonicalSymbol;
-    const ac = s.instrument.assetClass;
-    const hour = new Date(s.detectedAt).getUTCHours();
+  const withWinRate = <T extends { wins: number; losses: number }>(r: T) => ({
+    ...r,
+    resolved: r.wins + r.losses,
+    winRate: r.wins + r.losses > 0 ? ((r.wins / (r.wins + r.losses)) * 100).toFixed(1) + "%" : "N/A",
+  });
 
-    if (!byPair[sym]) byPair[sym] = { wins: 0, losses: 0, missed: 0 };
-    if (!byAssetClass[ac]) byAssetClass[ac] = { wins: 0, losses: 0 };
-    if (!byHour[hour]) byHour[hour] = { wins: 0, losses: 0, total: 0 };
-    if (!byStrategy[s.strategy]) byStrategy[s.strategy] = { wins: 0, losses: 0 };
-
-    byHour[hour].total++;
-    if (s.outcome === "WIN") { byPair[sym].wins++; byAssetClass[ac].wins++; byHour[hour].wins++; byStrategy[s.strategy].wins++; }
-    if (s.outcome === "LOSS") { byPair[sym].losses++; byAssetClass[ac].losses++; byHour[hour].losses++; byStrategy[s.strategy].losses++; }
-    if (s.outcome === "MISSED") { byPair[sym].missed++; }
-  }
-
-  const topPairs = Object.entries(byPair)
-    .map(([sym, d]) => ({ symbol: sym, ...d, total: d.wins + d.losses, winRate: d.wins + d.losses > 0 ? ((d.wins / (d.wins + d.losses)) * 100).toFixed(1) + "%" : "N/A" }))
-    .sort((a, b) => b.total - a.total);
-
-  const hourlyPerformance = Object.entries(byHour)
-    .map(([h, d]) => ({ hourUTC: parseInt(h), ...d, winRate: d.wins + d.losses > 0 ? ((d.wins / (d.wins + d.losses)) * 100).toFixed(1) + "%" : "N/A" }))
+  const topPairs = pairAgg.map((r) => ({ symbol: r.key, ...withWinRate(r) })).sort((a, b) => b.total - a.total);
+  const byAssetClass = Object.fromEntries(assetAgg.map((r) => [r.key, withWinRate(r)]));
+  const byStrategy = Object.fromEntries(strategyAgg.map((r) => [r.key, withWinRate(r)]));
+  const bySession = Object.fromEntries(sessionAgg.map((r) => [r.key, withWinRate(r)]));
+  const hourlyPerformance = hourAgg
+    .map((r) => ({ hourUTC: parseInt(r.key), ...withWinRate(r) }))
     .sort((a, b) => a.hourUTC - b.hourUTC);
 
   const signalLookup = new Map(archivedSignals.map((s) => [s.id, s]));
@@ -145,6 +139,7 @@ PRE-COMPUTED BREAKDOWNS:
 - By Pair: ${JSON.stringify(topPairs.slice(0, 20))}
 - By Asset Class: ${JSON.stringify(byAssetClass)}
 - By Strategy: ${JSON.stringify(byStrategy)}
+- By Session: ${JSON.stringify(bySession)}
 - By Hour (UTC): ${JSON.stringify(hourlyPerformance)}
 
 SIGNAL DATA (${archivedSignals.length} signals, ${analyzedCount} with deep-dive findings):

@@ -9,6 +9,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Link } from "wouter";
 import type { SignalWithInstrument, ScanRun } from "@shared/schema";
+import { DeepDiveButton } from "@/components/signal-journal";
 
 export default function Dashboard() {
   const { toast } = useToast();
@@ -167,35 +168,34 @@ export default function Dashboard() {
                   const reason = (sig.reasonJson ?? {}) as Record<string, any>;
                   const hasLevels = reason.entryPrice != null;
                   return (
-                    <Link key={sig.id} href={`/instruments/${sig.instrument.canonicalSymbol}`}>
-                      <div className="flex items-center justify-between p-3 rounded-md bg-card border border-card-border hover-elevate cursor-pointer" data-testid={`signal-row-${sig.id}`}>
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div className={`flex items-center justify-center w-8 h-8 rounded-md shrink-0 ${sig.direction === "LONG" ? "bg-emerald-500/10 text-emerald-500 dark:bg-emerald-500/20" : "bg-red-500/10 text-red-500 dark:bg-red-500/20"}`}>
-                            {sig.direction === "LONG" ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                    <div key={sig.id} className="flex items-center justify-between p-3 rounded-md bg-card border border-card-border hover-elevate" data-testid={`signal-row-${sig.id}`}>
+                      <Link href={`/instruments/${sig.instrument.canonicalSymbol}`} className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer">
+                        <div className={`flex items-center justify-center w-8 h-8 rounded-md shrink-0 ${sig.direction === "LONG" ? "bg-emerald-500/10 text-emerald-500 dark:bg-emerald-500/20" : "bg-red-500/10 text-red-500 dark:bg-red-500/20"}`}>
+                          {sig.direction === "LONG" ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-medium">{sig.instrument.canonicalSymbol}</span>
+                            <Badge variant="secondary" className="text-[10px]">{sig.strategy.replace(/_/g, " ")}</Badge>
                           </div>
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-sm font-medium">{sig.instrument.canonicalSymbol}</span>
-                              <Badge variant="secondary" className="text-[10px]">{sig.strategy.replace(/_/g, " ")}</Badge>
-                            </div>
-                            <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground flex-wrap">
-                              <span>{sig.timeframe} · {new Date(sig.detectedAt).toLocaleString()}</span>
-                              {hasLevels && (
-                                <span className="hidden sm:inline text-[11px]">
-                                  Entry {fmtPrice(reason.entryPrice)} · <span className="text-red-400">SL {fmtPrice(reason.stopLoss)}</span> · <span className="text-emerald-400">TP {fmtPrice(reason.takeProfit)}</span>
-                                </span>
-                              )}
-                            </div>
+                          <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground flex-wrap">
+                            <span>{sig.timeframe} · {new Date(sig.detectedAt).toLocaleString()}</span>
+                            {hasLevels && (
+                              <span className="hidden sm:inline text-[11px]">
+                                Entry {fmtPrice(reason.entryPrice)} · <span className="text-red-400">SL {fmtPrice(reason.stopLoss)}</span> · <span className="text-emerald-400">TP {fmtPrice(reason.takeProfit)}</span>
+                              </span>
+                            )}
                           </div>
                         </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <ScoreBadge score={sig.score} />
-                          <Badge variant={sig.direction === "LONG" ? "default" : "destructive"} className="text-[10px]">
-                            {sig.direction}
-                          </Badge>
-                        </div>
+                      </Link>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <ScoreBadge score={sig.score} />
+                        <Badge variant={sig.direction === "LONG" ? "default" : "destructive"} className="text-[10px]">
+                          {sig.direction}
+                        </Badge>
+                        <DeepDiveButton signalId={sig.id} size="sm" variant="ghost" />
                       </div>
-                    </Link>
+                    </div>
                   );
                 })}
               </div>
