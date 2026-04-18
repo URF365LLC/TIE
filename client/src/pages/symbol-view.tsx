@@ -76,7 +76,7 @@ export default function SymbolView() {
               <p className="text-xs text-muted-foreground mt-1">Run a scan to fetch market data</p>
             </div>
           ) : (
-            <CandleChart candles={candles} indicators={indicators} />
+            <CandleChart candles={candles} indicators={indicators} signals={signals} focusSignalId={focusSignalId} />
           )}
         </CardContent>
       </Card>
@@ -136,7 +136,7 @@ export default function SymbolView() {
   );
 }
 
-function CandleChart({ candles, indicators }: { candles: Candle[]; indicators?: Indicator[] }) {
+function CandleChart({ candles, indicators, signals, focusSignalId }: { candles: Candle[]; indicators?: Indicator[]; signals?: SignalWithInstrument[]; focusSignalId?: number | null }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
