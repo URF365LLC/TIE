@@ -7,7 +7,7 @@ import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Settings as SettingsIcon, Mail, Gauge, Save, ShieldAlert } from "lucide-react";
+import { Settings as SettingsIcon, Mail, Gauge, Save, ShieldAlert, Activity } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect } from "react";
@@ -32,6 +32,9 @@ export default function SettingsPage() {
     accountBalance: 50000,
     riskPercent: 1.0,
     signalEvalWindowHours: 4,
+    tdCreditLimitPerMin: 377,
+    tdCreditTargetPerMin: 340,
+    tdMaxConcurrency: 3,
   });
 
   useEffect(() => {
@@ -48,6 +51,9 @@ export default function SettingsPage() {
         accountBalance: settings.accountBalance,
         riskPercent: settings.riskPercent,
         signalEvalWindowHours: settings.signalEvalWindowHours ?? 4,
+        tdCreditLimitPerMin: (settings as any).tdCreditLimitPerMin ?? 377,
+        tdCreditTargetPerMin: (settings as any).tdCreditTargetPerMin ?? 340,
+        tdMaxConcurrency: (settings as any).tdMaxConcurrency ?? 3,
       });
     }
   }, [settings]);
@@ -165,6 +171,58 @@ export default function SettingsPage() {
                 </SelectContent>
               </Select>
               <p className="text-[11px] text-muted-foreground">Signals that don't hit TP/SL within this window are classified as MISSED (stalled)</p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-muted-foreground" />
+            <div>
+              <CardTitle className="text-base font-medium">Twelve Data Plan Limits</CardTitle>
+              <CardDescription className="text-xs">Tune the credit budget without redeploying</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="space-y-2">
+              <Label className="text-sm">Credit Limit / Min</Label>
+              <Input
+                type="number"
+                min={8}
+                max={5000}
+                value={form.tdCreditLimitPerMin}
+                onChange={(e) => setForm({ ...form, tdCreditLimitPerMin: parseInt(e.target.value) || 377 })}
+                data-testid="input-td-limit"
+              />
+              <p className="text-[11px] text-muted-foreground">Hard ceiling from your Twelve Data plan (Grow = 377)</p>
+            </div>
+            <div className="space-y-2">
+              <Label className="text-sm">Credit Target / Min</Label>
+              <Input
+                type="number"
+                min={8}
+                max={5000}
+                value={form.tdCreditTargetPerMin}
+                onChange={(e) => setForm({ ...form, tdCreditTargetPerMin: parseInt(e.target.value) || 340 })}
+                data-testid="input-td-target"
+              />
+              <p className="text-[11px] text-muted-foreground">Soft target the scanner aims for (leave headroom under the limit)</p>
+            </div>
+            <div className="space-y-2">
+              <Label className="text-sm">Max Concurrency</Label>
+              <Input
+                type="number"
+                min={1}
+                max={16}
+                value={form.tdMaxConcurrency}
+                onChange={(e) => setForm({ ...form, tdMaxConcurrency: parseInt(e.target.value) || 3 })}
+                data-testid="input-td-concurrency"
+              />
+              <p className="text-[11px] text-muted-foreground">Parallel in-flight Twelve Data requests</p>
             </div>
           </div>
         </CardContent>

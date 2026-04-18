@@ -5,9 +5,10 @@ import {
   varchar,
   boolean,
   integer,
-  real,
+  doublePrecision,
   timestamp,
   uniqueIndex,
+  index,
   serial,
   jsonb,
 } from "drizzle-orm/pg-core";
@@ -30,14 +31,14 @@ export const candles = pgTable(
   "candles",
   {
     id: serial("id").primaryKey(),
-    instrumentId: integer("instrument_id").notNull().references(() => instruments.id),
+    instrumentId: integer("instrument_id").notNull().references(() => instruments.id, { onDelete: "cascade" }),
     timeframe: varchar("timeframe", { length: 5 }).notNull(),
     datetimeUtc: timestamp("datetime_utc", tz).notNull(),
-    open: real("open").notNull(),
-    high: real("high").notNull(),
-    low: real("low").notNull(),
-    close: real("close").notNull(),
-    volume: real("volume"),
+    open: doublePrecision("open").notNull(),
+    high: doublePrecision("high").notNull(),
+    low: doublePrecision("low").notNull(),
+    close: doublePrecision("close").notNull(),
+    volume: doublePrecision("volume"),
     source: varchar("source", { length: 20 }).notNull().default("twelvedata"),
   },
   (table) => [
@@ -49,22 +50,22 @@ export const indicators = pgTable(
   "indicators",
   {
     id: serial("id").primaryKey(),
-    instrumentId: integer("instrument_id").notNull().references(() => instruments.id),
+    instrumentId: integer("instrument_id").notNull().references(() => instruments.id, { onDelete: "cascade" }),
     timeframe: varchar("timeframe", { length: 5 }).notNull(),
     datetimeUtc: timestamp("datetime_utc", tz).notNull(),
-    ema9: real("ema9"),
-    ema21: real("ema21"),
-    ema55: real("ema55"),
-    ema200: real("ema200"),
-    bbUpper: real("bb_upper"),
-    bbMiddle: real("bb_middle"),
-    bbLower: real("bb_lower"),
-    bbWidth: real("bb_width"),
-    macd: real("macd"),
-    macdSignal: real("macd_signal"),
-    macdHist: real("macd_hist"),
-    atr: real("atr"),
-    adx: real("adx"),
+    ema9: doublePrecision("ema9"),
+    ema21: doublePrecision("ema21"),
+    ema55: doublePrecision("ema55"),
+    ema200: doublePrecision("ema200"),
+    bbUpper: doublePrecision("bb_upper"),
+    bbMiddle: doublePrecision("bb_middle"),
+    bbLower: doublePrecision("bb_lower"),
+    bbWidth: doublePrecision("bb_width"),
+    macd: doublePrecision("macd"),
+    macdSignal: doublePrecision("macd_signal"),
+    macdHist: doublePrecision("macd_hist"),
+    atr: doublePrecision("atr"),
+    adx: doublePrecision("adx"),
   },
   (table) => [
     uniqueIndex("indicators_unique_idx").on(table.instrumentId, table.timeframe, table.datetimeUtc),
@@ -85,7 +86,7 @@ export const scanProgress = pgTable(
   "scan_progress",
   {
     id: serial("id").primaryKey(),
-    instrumentId: integer("instrument_id").notNull().references(() => instruments.id),
+    instrumentId: integer("instrument_id").notNull().references(() => instruments.id, { onDelete: "cascade" }),
     timeframe: varchar("timeframe", { length: 5 }).notNull(),
     lastProcessedBarUtc: timestamp("last_processed_bar_utc", tz).notNull(),
     updatedAt: timestamp("updated_at", tz).notNull().defaultNow(),
@@ -97,7 +98,7 @@ export const signals = pgTable(
   "signals",
   {
     id: serial("id").primaryKey(),
-    instrumentId: integer("instrument_id").notNull().references(() => instruments.id),
+    instrumentId: integer("instrument_id").notNull().references(() => instruments.id, { onDelete: "cascade" }),
     timeframe: varchar("timeframe", { length: 5 }).notNull(),
     strategy: varchar("strategy", { length: 30 }).notNull(),
     direction: varchar("direction", { length: 5 }).notNull(),
@@ -107,7 +108,7 @@ export const signals = pgTable(
     reasonJson: jsonb("reason_json"),
     status: varchar("status", { length: 20 }).notNull().default("NEW"),
     outcome: varchar("outcome", { length: 10 }),
-    outcomePrice: real("outcome_price"),
+    outcomePrice: doublePrecision("outcome_price"),
     resolvedAt: timestamp("resolved_at", tz),
   },
   (table) => [
@@ -118,19 +119,26 @@ export const signals = pgTable(
       table.direction,
       table.candleDatetimeUtc
     ),
+    index("signals_status_idx").on(table.status),
+    index("signals_detected_at_idx").on(table.detectedAt),
+    index("signals_status_detected_idx").on(table.status, table.detectedAt),
   ]
 );
 
-export const alertEvents = pgTable("alert_events", {
-  id: serial("id").primaryKey(),
-  signalId: integer("signal_id").notNull().references(() => signals.id),
-  sentAt: timestamp("sent_at", tz).notNull().defaultNow(),
-  channel: varchar("channel", { length: 10 }).notNull().default("EMAIL"),
-  to: varchar("to", { length: 255 }).notNull(),
-  subject: varchar("subject", { length: 500 }).notNull(),
-  status: varchar("status", { length: 20 }).notNull(),
-  error: text("error"),
-});
+export const alertEvents = pgTable(
+  "alert_events",
+  {
+    id: serial("id").primaryKey(),
+    signalId: integer("signal_id").notNull().references(() => signals.id, { onDelete: "cascade" }),
+    sentAt: timestamp("sent_at", tz).notNull().defaultNow(),
+    channel: varchar("channel", { length: 10 }).notNull().default("EMAIL"),
+    to: varchar("to", { length: 255 }).notNull(),
+    subject: varchar("subject", { length: 500 }).notNull(),
+    status: varchar("status", { length: 20 }).notNull(),
+    error: text("error"),
+  },
+  (table) => [index("alert_events_signal_id_idx").on(table.signalId)]
+);
 
 export const settings = pgTable("settings", {
   id: serial("id").primaryKey(),
@@ -144,13 +152,16 @@ export const settings = pgTable("settings", {
   burstSleepMs: integer("burst_sleep_ms").notNull().default(1000),
   alertCooldownMinutes: integer("alert_cooldown_minutes").notNull().default(60),
   accountBalance: integer("account_balance").notNull().default(50000),
-  riskPercent: real("risk_percent").notNull().default(1.0),
+  riskPercent: doublePrecision("risk_percent").notNull().default(1.0),
   signalEvalWindowHours: integer("signal_eval_window_hours").notNull().default(4),
+  tdCreditLimitPerMin: integer("td_credit_limit_per_min").notNull().default(377),
+  tdCreditTargetPerMin: integer("td_credit_target_per_min").notNull().default(340),
+  tdMaxConcurrency: integer("td_max_concurrency").notNull().default(3),
 });
 
 export const tradeAnalyses = pgTable("trade_analyses", {
   id: serial("id").primaryKey(),
-  signalId: integer("signal_id").notNull().references(() => signals.id).unique(),
+  signalId: integer("signal_id").notNull().references(() => signals.id, { onDelete: "cascade" }).unique(),
   analysis: text("analysis").notNull(),
   keyFindings: text("key_findings"),
   winLossFactors: text("win_loss_factors"),

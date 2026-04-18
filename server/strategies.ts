@@ -9,11 +9,22 @@ interface StrategyInput {
   entryTimeframe: string;
 }
 
-interface StrategyResult {
+export interface StrategyResult {
   strategy: string;
   direction: "LONG" | "SHORT";
   score: number;
   reasonJson: Record<string, any>;
+}
+
+export interface StrategyRejection {
+  strategy: string;
+  reason: string;
+  details?: Record<string, any>;
+}
+
+export interface StrategyEvaluation {
+  accepted: StrategyResult[];
+  rejections: StrategyRejection[];
 }
 
 function indicatorForCandle(indicators: Indicator[], candle: Candle): Indicator | undefined {
@@ -37,22 +48,32 @@ export function hasRequiredIndicators(ind: Indicator | undefined): boolean {
   );
 }
 
-export function evaluateStrategies(input: StrategyInput): StrategyResult[] {
-  const results: StrategyResult[] = [];
+export function evaluateStrategies(input: StrategyInput): StrategyEvaluation {
+  const accepted: StrategyResult[] = [];
+  const rejections: StrategyRejection[] = [];
 
   const trend = evaluateTrendContinuation(input);
-  if (trend) results.push(trend);
+  if ("score" in trend) accepted.push(trend);
+  else rejections.push(trend);
 
   const breakout = evaluateRangeBreakout(input);
-  if (breakout) results.push(breakout);
+  if ("score" in breakout) accepted.push(breakout);
+  else rejections.push(breakout);
 
-  return results;
+  return { accepted, rejections };
 }
 
-function evaluateTrendContinuation(input: StrategyInput): StrategyResult | null {
-  const { biasIndicators, entryCandles, entryIndicators } = input;
+function reject(strategy: string, reason: string, details?: Record<string, any>): StrategyRejection {
+  return { strategy, reason, details };
+}
 
-  if (biasIndicators.length < 4 || entryCandles.length < 2) return null;
+function evaluateTrendContinuation(input: StrategyInput): StrategyResult | StrategyRejection {
+  const { biasIndicators, entryCandles, entryIndicators } = input;
+  const STRAT = "TREND_CONTINUATION";
+
+  if (biasIndicators.length < 4 || entryCandles.length < 2) {
+    return reject(STRAT, "insufficient_data", { biasIndicators: biasIndicators.length, entryCandles: entryCandles.length });
+  }
 
   const latestClosed = entryCandles[0];
   const prevClosed = entryCandles[1];
@@ -60,25 +81,33 @@ function evaluateTrendContinuation(input: StrategyInput): StrategyResult | null 
   const latestBias = biasIndicators[0];
   const bias3Ago = biasIndicators[3];
 
-  if (!latestEntry || latestBias.ema200 == null || bias3Ago?.ema200 == null) return null;
-  if (!hasRequiredIndicators(latestEntry)) return null;
+  if (!latestEntry || latestBias.ema200 == null || bias3Ago?.ema200 == null) {
+    return reject(STRAT, "missing_indicator_values");
+  }
+  if (!hasRequiredIndicators(latestEntry)) {
+    return reject(STRAT, "incomplete_entry_indicators");
+  }
 
   const ema200SlopeUp = latestBias.ema200 > bias3Ago.ema200;
   const ema200SlopeDown = latestBias.ema200 < bias3Ago.ema200;
   const closeBias = latestClosed.close;
 
-  let direction: "LONG" | "SHORT" | null = null;
-  const reasons: Record<string, any> = {};
-  let score = 0;
-
   const longBias = closeBias > latestBias.ema200 && ema200SlopeUp;
   const shortBias = closeBias < latestBias.ema200 && ema200SlopeDown;
 
-  if (!longBias && !shortBias) return null;
+  if (!longBias && !shortBias) {
+    return reject(STRAT, "no_directional_bias", {
+      ema200: latestBias.ema200,
+      slope: ema200SlopeUp ? "up" : ema200SlopeDown ? "down" : "flat",
+      close: closeBias,
+    });
+  }
 
-  direction = longBias ? "LONG" : "SHORT";
-  reasons.bias = direction === "LONG" ? "close > EMA200, slope up" : "close < EMA200, slope down";
-  score += 20;
+  const direction: "LONG" | "SHORT" = longBias ? "LONG" : "SHORT";
+  const reasons: Record<string, any> = {
+    bias: direction === "LONG" ? "close > EMA200, slope up" : "close < EMA200, slope down",
+  };
+  let score = 20;
 
   const emaStack =
     direction === "LONG"
@@ -128,31 +157,42 @@ function evaluateTrendContinuation(input: StrategyInput): StrategyResult | null 
   reasons.ema21Zone = parseFloat(ema21Val.toFixed(5));
   reasons.ema55Zone = parseFloat(ema55Val.toFixed(5));
 
-  if (score < 40) return null;
+  if (score < 40) {
+    return reject(STRAT, "score_below_threshold", { score, threshold: 40, partialReasons: reasons });
+  }
 
-  return { strategy: "TREND_CONTINUATION", direction, score: Math.min(score, 100), reasonJson: reasons };
+  return { strategy: STRAT, direction, score: Math.min(score, 100), reasonJson: reasons };
 }
 
-function evaluateRangeBreakout(input: StrategyInput): StrategyResult | null {
+function evaluateRangeBreakout(input: StrategyInput): StrategyResult | StrategyRejection {
   const { entryCandles, entryIndicators } = input;
+  const STRAT = "RANGE_BREAKOUT";
 
-  if (entryCandles.length < 24 || entryIndicators.length < 50) return null;
+  if (entryCandles.length < 24 || entryIndicators.length < 50) {
+    return reject(STRAT, "insufficient_data", { entryCandles: entryCandles.length, entryIndicators: entryIndicators.length });
+  }
 
   const latestClosed = entryCandles[0];
   const prevClosed = entryCandles[1];
   const latestInd = indicatorForCandle(entryIndicators, latestClosed);
-  if (!latestInd || !hasRequiredIndicators(latestInd)) return null;
+  if (!latestInd || !hasRequiredIndicators(latestInd)) {
+    return reject(STRAT, "incomplete_entry_indicators");
+  }
 
-  // filters first: ADX -> BB width -> ATR present (in hasRequiredIndicators)
-  if (latestInd.adx! > 18) return null;
+  if (latestInd.adx! > 18) {
+    return reject(STRAT, "adx_above_ceiling", { adx: latestInd.adx, ceiling: 18 });
+  }
 
   const bbWidths = entryIndicators.slice(0, 50).map((i) => i.bbWidth).filter((w): w is number => w != null);
-  if (bbWidths.length < 10) return null;
+  if (bbWidths.length < 10) {
+    return reject(STRAT, "insufficient_bbwidth_history");
+  }
   const sorted = [...bbWidths].sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
-  if (latestInd.bbWidth! >= median) return null;
+  if (latestInd.bbWidth! >= median) {
+    return reject(STRAT, "bbwidth_not_compressed", { current: latestInd.bbWidth, median });
+  }
 
-  // Build range from candles BEFORE the two follow-through candles.
   const baseRange = entryCandles.slice(2, 22);
   const rangeHigh = Math.max(...baseRange.map((c) => c.high));
   const rangeLow = Math.min(...baseRange.map((c) => c.low));
@@ -188,7 +228,14 @@ function evaluateRangeBreakout(input: StrategyInput): StrategyResult | null {
     score = 70;
   }
 
-  if (!direction) return null;
+  if (!direction) {
+    return reject(STRAT, "no_breakout_followthrough", {
+      latestClose: latestClosed.close,
+      prevClose: prevClosed.close,
+      rangeHigh,
+      rangeLow,
+    });
+  }
 
   const entryPrice = latestClosed.close;
   const stopLoss = direction === "LONG" ? entryPrice - stopDist : entryPrice + stopDist;
@@ -199,5 +246,5 @@ function evaluateRangeBreakout(input: StrategyInput): StrategyResult | null {
   reasons.takeProfit = parseFloat(takeProfit.toFixed(5));
   reasons.riskRewardRatio = "1:2";
 
-  return { strategy: "RANGE_BREAKOUT", direction, score: Math.min(score, 100), reasonJson: reasons };
+  return { strategy: STRAT, direction, score: Math.min(score, 100), reasonJson: reasons };
 }

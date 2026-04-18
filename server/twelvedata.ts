@@ -1,9 +1,12 @@
 import { log } from "./logger";
+import { storage } from "./storage";
 
 const BASE_URL = "https://api.twelvedata.com";
-const PLAN_LIMIT_PER_MIN = 610;
-const TARGET_CREDITS_PER_MIN = 520;
+const DEFAULT_LIMIT_PER_MIN = 377;
+const DEFAULT_TARGET_PER_MIN = 340;
+const DEFAULT_MAX_CONCURRENCY = 3;
 const MAX_RETRIES = 3;
+const SETTINGS_REFRESH_MS = 30_000;
 
 interface RateLimitState {
   creditsUsed: number;
@@ -12,24 +15,45 @@ interface RateLimitState {
   paused: boolean;
   pauseUntil: number;
   retryCount: number;
+  limitPerMin: number;
+  targetPerMin: number;
+  maxConcurrency: number;
 }
 
 const rateLimit: RateLimitState = {
   creditsUsed: 0,
-  creditsLeft: PLAN_LIMIT_PER_MIN,
+  creditsLeft: DEFAULT_LIMIT_PER_MIN,
   lastReset: Date.now(),
   paused: false,
   pauseUntil: 0,
   retryCount: 0,
+  limitPerMin: DEFAULT_LIMIT_PER_MIN,
+  targetPerMin: DEFAULT_TARGET_PER_MIN,
+  maxConcurrency: DEFAULT_MAX_CONCURRENCY,
 };
 
-let requestQueue: Promise<void> = Promise.resolve();
+let activeRequests = 0;
+const waitQueue: Array<() => void> = [];
+let settingsLoadedAt = 0;
 let sleepFn: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function getApiKey(): string {
   const key = process.env.TWELVEDATA_API_KEY;
   if (!key) throw new Error("TWELVEDATA_API_KEY not set");
   return key;
+}
+
+async function refreshSettingsIfStale(): Promise<void> {
+  if (Date.now() - settingsLoadedAt < SETTINGS_REFRESH_MS) return;
+  try {
+    const s = await storage.getSettings();
+    rateLimit.limitPerMin = s.tdCreditLimitPerMin ?? DEFAULT_LIMIT_PER_MIN;
+    rateLimit.targetPerMin = s.tdCreditTargetPerMin ?? DEFAULT_TARGET_PER_MIN;
+    rateLimit.maxConcurrency = s.tdMaxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
+    settingsLoadedAt = Date.now();
+  } catch {
+    // settings unavailable; keep defaults
+  }
 }
 
 function parseHeaderInt(value: string | null): number | null {
@@ -42,7 +66,7 @@ function resetWindowIfNeeded(): void {
   if (Date.now() - rateLimit.lastReset > 60000) {
     rateLimit.lastReset = Date.now();
     rateLimit.creditsUsed = 0;
-    rateLimit.creditsLeft = PLAN_LIMIT_PER_MIN;
+    rateLimit.creditsLeft = rateLimit.limitPerMin;
     rateLimit.paused = false;
     rateLimit.pauseUntil = 0;
     rateLimit.retryCount = 0;
@@ -58,7 +82,7 @@ function jitterMs(): number {
   return Math.floor(Math.random() * 500);
 }
 
-async function waitForBudget(): Promise<void> {
+async function waitForBudget(creditCost = 1): Promise<void> {
   resetWindowIfNeeded();
 
   const now = Date.now();
@@ -67,9 +91,10 @@ async function waitForBudget(): Promise<void> {
     resetWindowIfNeeded();
   }
 
-  if (rateLimit.creditsUsed >= TARGET_CREDITS_PER_MIN || rateLimit.creditsLeft <= PLAN_LIMIT_PER_MIN - TARGET_CREDITS_PER_MIN) {
+  const projected = rateLimit.creditsUsed + creditCost;
+  if (projected > rateLimit.targetPerMin || rateLimit.creditsLeft <= creditCost) {
     const waitMs = msUntilNextMinuteBoundary() + 25;
-    log(`Credit budget reached, deferring ${waitMs}ms`, "twelvedata");
+    log(`Credit budget reached (${rateLimit.creditsUsed}/${rateLimit.targetPerMin}), deferring ${waitMs}ms`, "twelvedata");
     await sleepFn(waitMs);
     resetWindowIfNeeded();
   }
@@ -82,35 +107,61 @@ function updateRateLimit(headers: Headers): void {
   if (left !== null) rateLimit.creditsLeft = left;
 }
 
-async function enqueueRequest<T>(work: () => Promise<T>): Promise<T> {
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const prior = requestQueue;
-  requestQueue = prior.then(() => gate).catch(() => gate);
-  await prior;
+async function acquireSlot(): Promise<void> {
+  if (activeRequests < rateLimit.maxConcurrency) {
+    activeRequests++;
+    return;
+  }
+  await new Promise<void>((resolve) => waitQueue.push(resolve));
+  activeRequests++;
+}
 
+function releaseSlot(): void {
+  activeRequests = Math.max(0, activeRequests - 1);
+  const next = waitQueue.shift();
+  if (next) next();
+}
+
+async function withSlot<T>(work: () => Promise<T>): Promise<T> {
+  await acquireSlot();
   try {
     return await work();
   } finally {
-    release();
+    releaseSlot();
   }
 }
 
-async function requestWithRetry(endpoint: string, params: Record<string, string | number>): Promise<any[]> {
-  return enqueueRequest(async () => {
+function isTransientStatus(status: number): boolean {
+  return status >= 500 && status <= 599;
+}
+
+async function backoffMs(attempt: number): Promise<void> {
+  const base = Math.min(1000 * Math.pow(2, attempt), 8000);
+  await sleepFn(base + jitterMs());
+}
+
+async function requestWithRetry(endpoint: string, params: Record<string, string | number>, creditCost = 1): Promise<any[]> {
+  await refreshSettingsIfStale();
+  return withSlot(async () => {
     let lastErr: Error | null = null;
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      await waitForBudget();
+      await waitForBudget(creditCost);
 
       const qs = new URLSearchParams();
       for (const [key, value] of Object.entries(params)) qs.set(key, String(value));
       qs.set("apikey", getApiKey());
       const url = `${BASE_URL}/${endpoint}?${qs.toString()}`;
 
-      const res = await fetch(url);
+      let res: Response;
+      try {
+        res = await fetch(url);
+      } catch (err: any) {
+        lastErr = new Error(`Network error for ${endpoint}: ${err.message}`);
+        log(`Network error ${endpoint}, attempt ${attempt + 1}/${MAX_RETRIES}: ${err.message}`, "twelvedata");
+        await backoffMs(attempt);
+        continue;
+      }
       updateRateLimit(res.headers);
 
       if (res.status === 429) {
@@ -120,6 +171,14 @@ async function requestWithRetry(endpoint: string, params: Record<string, string 
         rateLimit.pauseUntil = Date.now() + waitMs;
         log(`429 ${endpoint}, retry ${attempt + 1}/${MAX_RETRIES}, waiting ${waitMs}ms`, "twelvedata");
         await sleepFn(waitMs);
+        continue;
+      }
+
+      if (isTransientStatus(res.status)) {
+        rateLimit.retryCount += 1;
+        lastErr = new Error(`HTTP ${res.status} for ${endpoint}`);
+        log(`Transient ${res.status} ${endpoint}, retry ${attempt + 1}/${MAX_RETRIES}`, "twelvedata");
+        await backoffMs(attempt);
         continue;
       }
 
@@ -135,11 +194,12 @@ async function requestWithRetry(endpoint: string, params: Record<string, string 
         break;
       }
 
+      // If headers didn't report credit usage, fall back to local accounting.
       if (parseHeaderInt(res.headers.get("api-credits-used")) === null) {
-        rateLimit.creditsUsed += 1;
+        rateLimit.creditsUsed += creditCost;
       }
       if (parseHeaderInt(res.headers.get("api-credits-left")) === null) {
-        rateLimit.creditsLeft = Math.max(rateLimit.creditsLeft - 1, 0);
+        rateLimit.creditsLeft = Math.max(rateLimit.creditsLeft - creditCost, 0);
       }
 
       return data.values || [];
@@ -177,44 +237,7 @@ export async function fetchADX(vendorSymbol: string, interval: string, outputsiz
   return requestWithRetry("adx", { symbol: vendorSymbol, interval, time_period: 14, outputsize, timezone: "UTC" });
 }
 
-
-
-async function fetchIndicatorPackBatch(vendorSymbol: string, interval: string, outputsize: number): Promise<any | null> {
-  try {
-    const body = {
-      data: [
-        { endpoint: "time_series", params: { symbol: vendorSymbol, interval, outputsize, timezone: "UTC" } },
-        { endpoint: "ema", params: { symbol: vendorSymbol, interval, time_period: 9, outputsize, timezone: "UTC" } },
-        { endpoint: "ema", params: { symbol: vendorSymbol, interval, time_period: 21, outputsize, timezone: "UTC" } },
-        { endpoint: "ema", params: { symbol: vendorSymbol, interval, time_period: 55, outputsize, timezone: "UTC" } },
-        { endpoint: "ema", params: { symbol: vendorSymbol, interval, time_period: 200, outputsize, timezone: "UTC" } },
-        { endpoint: "bbands", params: { symbol: vendorSymbol, interval, time_period: 20, sd: 2, outputsize, timezone: "UTC" } },
-        { endpoint: "macd", params: { symbol: vendorSymbol, interval, outputsize, timezone: "UTC" } },
-        { endpoint: "atr", params: { symbol: vendorSymbol, interval, time_period: 14, outputsize, timezone: "UTC" } },
-        { endpoint: "adx", params: { symbol: vendorSymbol, interval, time_period: 14, outputsize, timezone: "UTC" } },
-      ],
-    };
-
-    const res = await fetch(`${BASE_URL}/batch?apikey=${getApiKey()}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) return null;
-    updateRateLimit(res.headers);
-    const data = await res.json();
-    return data;
-  } catch {
-    return null;
-  }
-}
-
-export async function fetchAllIndicatorsForSymbol(
-  vendorSymbol: string,
-  interval: string,
-  outputsize = 100
-): Promise<{
+interface SymbolPackResult {
   candles: any[];
   ema9: any[];
   ema21: any[];
@@ -224,24 +247,106 @@ export async function fetchAllIndicatorsForSymbol(
   macd: any[];
   atr: any[];
   adx: any[];
-}> {
-  const batch = await fetchIndicatorPackBatch(vendorSymbol, interval, outputsize);
-  if (batch && Array.isArray(batch.data) && batch.data.length >= 9) {
-    const rows = batch.data;
-    return {
-      candles: rows[0]?.values || [],
-      ema9: rows[1]?.values || [],
-      ema21: rows[2]?.values || [],
-      ema55: rows[3]?.values || [],
-      ema200: rows[4]?.values || [],
-      bbands: rows[5]?.values || [],
-      macd: rows[6]?.values || [],
-      atr: rows[7]?.values || [],
-      adx: rows[8]?.values || [],
-    };
+}
+
+function buildSymbolPackRequests(vendorSymbol: string, interval: string, outputsize: number) {
+  return [
+    { endpoint: "time_series", params: { symbol: vendorSymbol, interval, outputsize, timezone: "UTC" } },
+    { endpoint: "ema", params: { symbol: vendorSymbol, interval, time_period: 9, outputsize, timezone: "UTC" } },
+    { endpoint: "ema", params: { symbol: vendorSymbol, interval, time_period: 21, outputsize, timezone: "UTC" } },
+    { endpoint: "ema", params: { symbol: vendorSymbol, interval, time_period: 55, outputsize, timezone: "UTC" } },
+    { endpoint: "ema", params: { symbol: vendorSymbol, interval, time_period: 200, outputsize, timezone: "UTC" } },
+    { endpoint: "bbands", params: { symbol: vendorSymbol, interval, time_period: 20, sd: 2, outputsize, timezone: "UTC" } },
+    { endpoint: "macd", params: { symbol: vendorSymbol, interval, outputsize, timezone: "UTC" } },
+    { endpoint: "atr", params: { symbol: vendorSymbol, interval, time_period: 14, outputsize, timezone: "UTC" } },
+    { endpoint: "adx", params: { symbol: vendorSymbol, interval, time_period: 14, outputsize, timezone: "UTC" } },
+  ];
+}
+
+function unpackSymbolPack(rows: any[]): SymbolPackResult {
+  return {
+    candles: rows[0]?.values || [],
+    ema9: rows[1]?.values || [],
+    ema21: rows[2]?.values || [],
+    ema55: rows[3]?.values || [],
+    ema200: rows[4]?.values || [],
+    bbands: rows[5]?.values || [],
+    macd: rows[6]?.values || [],
+    atr: rows[7]?.values || [],
+    adx: rows[8]?.values || [],
+  };
+}
+
+async function executeBatch(requests: Array<{ endpoint: string; params: Record<string, any> }>): Promise<any[] | null> {
+  await refreshSettingsIfStale();
+  return withSlot(async () => {
+    const creditCost = requests.length;
+
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      await waitForBudget(creditCost);
+
+      let res: Response;
+      try {
+        res = await fetch(`${BASE_URL}/batch?apikey=${getApiKey()}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ data: requests }),
+        });
+      } catch (err: any) {
+        log(`Batch network error attempt ${attempt + 1}/${MAX_RETRIES}: ${err.message}`, "twelvedata");
+        await backoffMs(attempt);
+        continue;
+      }
+
+      updateRateLimit(res.headers);
+
+      if (res.status === 429) {
+        const waitMs = msUntilNextMinuteBoundary() + jitterMs();
+        rateLimit.paused = true;
+        rateLimit.pauseUntil = Date.now() + waitMs;
+        rateLimit.retryCount += 1;
+        log(`Batch 429, retry ${attempt + 1}/${MAX_RETRIES}, waiting ${waitMs}ms`, "twelvedata");
+        await sleepFn(waitMs);
+        continue;
+      }
+
+      if (isTransientStatus(res.status)) {
+        rateLimit.retryCount += 1;
+        log(`Batch transient ${res.status}, retry ${attempt + 1}/${MAX_RETRIES}`, "twelvedata");
+        await backoffMs(attempt);
+        continue;
+      }
+
+      if (!res.ok) {
+        return null;
+      }
+
+      const data = await res.json();
+      if (parseHeaderInt(res.headers.get("api-credits-used")) === null) {
+        rateLimit.creditsUsed += creditCost;
+      }
+      if (parseHeaderInt(res.headers.get("api-credits-left")) === null) {
+        rateLimit.creditsLeft = Math.max(rateLimit.creditsLeft - creditCost, 0);
+      }
+      if (data && Array.isArray(data.data)) return data.data;
+      return null;
+    }
+    return null;
+  });
+}
+
+export async function fetchAllIndicatorsForSymbol(
+  vendorSymbol: string,
+  interval: string,
+  outputsize = 100
+): Promise<SymbolPackResult> {
+  const requests = buildSymbolPackRequests(vendorSymbol, interval, outputsize);
+  const rows = await executeBatch(requests);
+  if (rows && rows.length >= 9) {
+    return unpackSymbolPack(rows);
   }
 
-  // Sequential fallback keeps credit accounting deterministic under a single global governor.
+  // Sequential fallback (each call counts against the budget on its own).
   const candles = await fetchTimeSeries(vendorSymbol, interval, outputsize);
   const ema9 = await fetchEMA(vendorSymbol, interval, 9, outputsize);
   const ema21 = await fetchEMA(vendorSymbol, interval, 21, outputsize);
@@ -255,6 +360,33 @@ export async function fetchAllIndicatorsForSymbol(
   return { candles, ema9, ema21, ema55, ema200, bbands, macd, atr, adx };
 }
 
+export async function fetchAllIndicatorsForSymbolMulti(
+  vendorSymbol: string,
+  intervals: string[],
+  outputsize = 100
+): Promise<Record<string, SymbolPackResult>> {
+  const allRequests: Array<{ endpoint: string; params: Record<string, any> }> = [];
+  for (const interval of intervals) {
+    allRequests.push(...buildSymbolPackRequests(vendorSymbol, interval, outputsize));
+  }
+
+  const result: Record<string, SymbolPackResult> = {};
+  const rows = await executeBatch(allRequests);
+
+  if (rows && rows.length >= allRequests.length) {
+    for (let i = 0; i < intervals.length; i++) {
+      const slice = rows.slice(i * 9, i * 9 + 9);
+      result[intervals[i]] = unpackSymbolPack(slice);
+    }
+    return result;
+  }
+
+  for (const interval of intervals) {
+    result[interval] = await fetchAllIndicatorsForSymbol(vendorSymbol, interval, outputsize);
+  }
+  return result;
+}
+
 export function getRateLimitState() {
   return { ...rateLimit };
 }
@@ -265,11 +397,13 @@ export const __testHooks = {
   },
   resetState() {
     rateLimit.creditsUsed = 0;
-    rateLimit.creditsLeft = PLAN_LIMIT_PER_MIN;
+    rateLimit.creditsLeft = rateLimit.limitPerMin;
     rateLimit.lastReset = Date.now();
     rateLimit.paused = false;
     rateLimit.pauseUntil = 0;
     rateLimit.retryCount = 0;
-    requestQueue = Promise.resolve();
+    activeRequests = 0;
+    waitQueue.length = 0;
+    settingsLoadedAt = 0;
   },
 };

@@ -1,11 +1,11 @@
 import { storage } from "./storage";
 import { db } from "./db";
 import { sql } from "drizzle-orm";
-import { fetchAllIndicatorsForSymbol, getRateLimitState } from "./twelvedata";
-import { evaluateStrategies, hasRequiredIndicators } from "./strategies";
+import { fetchAllIndicatorsForSymbolMulti, getRateLimitState } from "./twelvedata";
+import { evaluateStrategies, hasRequiredIndicators, type StrategyRejection } from "./strategies";
 import { sendSignalAlert } from "./alerter";
 import { log } from "./logger";
-import type { Instrument, InsertCandle, InsertIndicator, Candle, Indicator } from "@shared/schema";
+import type { Instrument, InsertCandle, InsertIndicator, Candle, Indicator, Signal } from "@shared/schema";
 
 let scannerTimeout: NodeJS.Timeout | null = null;
 let isScanning = false;
@@ -22,6 +22,11 @@ export function getLatestClosedCandle(candles: Candle[], timeframe: "15m" | "1h"
   const tfMs = timeframe === "15m" ? 15 * 60 * 1000 : 60 * 60 * 1000;
   const nowMs = now.getTime();
   return candles.find((c) => c.datetimeUtc.getTime() + tfMs <= nowMs) ?? null;
+}
+
+function expectedLatestClosedBoundary(timeframe: "15m" | "1h", now = Date.now()): number {
+  const tfMs = timeframe === "15m" ? 15 * 60 * 1000 : 60 * 60 * 1000;
+  return Math.floor(now / tfMs) * tfMs - tfMs;
 }
 
 function indicatorsCompleteForCandle(candle: Candle, indicators: Indicator[]): boolean {
@@ -46,6 +51,15 @@ export async function startScanner(): Promise<void> {
     return;
   }
 
+  try {
+    const reconciled = await storage.reconcileZombieScanRuns();
+    if (reconciled > 0) {
+      log(`Reconciled ${reconciled} zombie scan_run(s) from previous process`, "scanner");
+    }
+  } catch (err: any) {
+    log(`Zombie scan reconciliation failed: ${err.message}`, "scanner");
+  }
+
   log("Scanner started - anchored to 15-minute wall-clock boundaries", "scanner");
   scheduleNextTick();
 }
@@ -68,8 +82,11 @@ function scheduleNextTick(): void {
 async function tick(): Promise<void> {
   const settings = await storage.getSettings();
 
+  // Per-tick candle cache shared by resolveActiveSignals and expireOldSignals to avoid N+1 reads.
+  const candleCache = new Map<string, Candle[]>();
+
   try {
-    const resolvedCount = await resolveActiveSignals();
+    const resolvedCount = await resolveActiveSignals(candleCache);
     if (resolvedCount > 0) {
       log(`Real-time resolved ${resolvedCount} signal(s) (TP/SL hit)`, "scanner");
     }
@@ -79,7 +96,7 @@ async function tick(): Promise<void> {
 
   try {
     const evalWindowMs = (settings.signalEvalWindowHours ?? 4) * 60 * 60 * 1000;
-    const expiredCount = await expireOldSignals(evalWindowMs);
+    const expiredCount = await expireOldSignals(evalWindowMs, candleCache);
     if (expiredCount > 0) {
       log(`Expired ${expiredCount} stalled signal(s) past ${settings.signalEvalWindowHours ?? 4}h window as MISSED`, "scanner");
     }
@@ -121,15 +138,22 @@ export async function runScanCycle(timeframe: string, maxPerBurst: number = 4, b
     const instruments = await storage.getEnabledInstruments();
     let processedCount = 0;
     let signalCount = 0;
+    let skippedFresh = 0;
     const failures: Array<{ symbol: string; error: string }> = [];
+    const rejectionTotals: Record<string, number> = {};
 
     for (let i = 0; i < instruments.length; i += maxPerBurst) {
       const burst = instruments.slice(i, i + maxPerBurst);
 
       for (const inst of burst) {
         try {
-          const count = await processInstrument(inst);
-          signalCount += count;
+          const r = await processInstrument(inst);
+          signalCount += r.signalCount;
+          if (r.skippedFresh) skippedFresh++;
+          for (const rej of r.rejections) {
+            const key = `${rej.strategy}:${rej.reason}`;
+            rejectionTotals[key] = (rejectionTotals[key] ?? 0) + 1;
+          }
           processedCount++;
         } catch (err: any) {
           failures.push({ symbol: inst.canonicalSymbol, error: err.message });
@@ -147,10 +171,18 @@ export async function runScanCycle(timeframe: string, maxPerBurst: number = 4, b
       finishedAt: new Date(),
       status: failures.length ? "completed_with_errors" : "completed",
       creditsUsedEst: rl.creditsUsed,
-      notes: JSON.stringify({ processedCount, total: instruments.length, signalCount, failures, retryCount: rl.retryCount }),
+      notes: JSON.stringify({
+        processedCount,
+        total: instruments.length,
+        signalCount,
+        skippedFresh,
+        rejections: rejectionTotals,
+        failures,
+        retryCount: rl.retryCount,
+      }),
     });
 
-    log(`Scan completed: ${processedCount} instruments, ${signalCount} signals`, "scanner");
+    log(`Scan completed: ${processedCount} instruments, ${signalCount} signals, ${skippedFresh} skipped fresh`, "scanner");
   } catch (err: any) {
     await storage.updateScanRun(scanRun.id, {
       finishedAt: new Date(),
@@ -163,12 +195,22 @@ export async function runScanCycle(timeframe: string, maxPerBurst: number = 4, b
   }
 }
 
-async function ingestData(inst: Instrument, timeframe: string, interval: string): Promise<void> {
-  const data = await fetchAllIndicatorsForSymbol(inst.vendorSymbol, interval, 100);
+interface PackData {
+  candles: any[];
+  ema9: any[];
+  ema21: any[];
+  ema55: any[];
+  ema200: any[];
+  bbands: any[];
+  macd: any[];
+  atr: any[];
+  adx: any[];
+}
 
+async function persistPack(inst: Instrument, timeframe: string, data: PackData): Promise<boolean> {
   if (!data.candles.length) {
     log(`No candle data for ${inst.canonicalSymbol} (${timeframe})`, "scanner");
-    return;
+    return false;
   }
 
   const candleRows: InsertCandle[] = data.candles.map((c: any) => ({
@@ -185,7 +227,6 @@ async function ingestData(inst: Instrument, timeframe: string, interval: string)
   await storage.upsertCandles(candleRows);
 
   const indicatorMap = new Map<string, Partial<InsertIndicator>>();
-
   const getOrCreate = (datetime: string): Partial<InsertIndicator> => {
     if (!indicatorMap.has(datetime)) {
       indicatorMap.set(datetime, {
@@ -219,14 +260,31 @@ async function ingestData(inst: Instrument, timeframe: string, interval: string)
   for (const v of data.atr) getOrCreate(v.datetime).atr = parseFloat(v.atr);
   for (const v of data.adx) getOrCreate(v.datetime).adx = parseFloat(v.adx);
 
-  const indRows = Array.from(indicatorMap.values()).filter((r) => r.instrumentId && r.timeframe && r.datetimeUtc) as InsertIndicator[];
-
+  const indRows = Array.from(indicatorMap.values()).filter(
+    (r) => r.instrumentId && r.timeframe && r.datetimeUtc
+  ) as InsertIndicator[];
   await storage.upsertIndicators(indRows);
+  return true;
 }
 
-async function processInstrument(inst: Instrument): Promise<number> {
-  await ingestData(inst, "15m", "15min");
-  await ingestData(inst, "1h", "1h");
+interface ProcessResult {
+  signalCount: number;
+  skippedFresh: boolean;
+  rejections: StrategyRejection[];
+}
+
+async function processInstrument(inst: Instrument): Promise<ProcessResult> {
+  // Freshness gate: if scan_progress already covers the latest expected closed 15m bar, skip the API entirely.
+  const expectedEntryBoundary = expectedLatestClosedBoundary("15m");
+  const progress = await storage.getScanProgress(inst.id, "15m");
+  if (progress && progress.lastProcessedBarUtc.getTime() >= expectedEntryBoundary) {
+    return { signalCount: 0, skippedFresh: true, rejections: [] };
+  }
+
+  // Combined batch fetch for both timeframes
+  const multi = await fetchAllIndicatorsForSymbolMulti(inst.vendorSymbol, ["15min", "1h"], 100);
+  await persistPack(inst, "15m", multi["15min"]);
+  await persistPack(inst, "1h", multi["1h"]);
 
   const entryCandles = await storage.getCandles(inst.id, "15m", 100);
   const entryIndicators = await storage.getIndicators(inst.id, "15m", 100);
@@ -237,24 +295,27 @@ async function processInstrument(inst: Instrument): Promise<number> {
   const latestClosedEntry = getLatestClosedCandle(entryCandles, "15m", now);
   const latestClosedBias = getLatestClosedCandle(biasCandles, "1h", now);
 
-  if (!latestClosedEntry || !latestClosedBias) return 0;
+  if (!latestClosedEntry || !latestClosedBias) {
+    return { signalCount: 0, skippedFresh: false, rejections: [{ strategy: "ALL", reason: "no_closed_candle" }] };
+  }
 
-  const progress = await storage.getScanProgress(inst.id, "15m");
   if (progress && progress.lastProcessedBarUtc.getTime() >= latestClosedEntry.datetimeUtc.getTime()) {
-    return 0;
+    return { signalCount: 0, skippedFresh: true, rejections: [] };
   }
 
   const entryForEval = entryCandles.filter((c) => c.datetimeUtc.getTime() <= latestClosedEntry.datetimeUtc.getTime());
   const biasForEval = biasCandles.filter((c) => c.datetimeUtc.getTime() <= latestClosedBias.datetimeUtc.getTime());
 
-  if (!entryForEval.length || !biasForEval.length) return 0;
+  if (!entryForEval.length || !biasForEval.length) {
+    return { signalCount: 0, skippedFresh: false, rejections: [{ strategy: "ALL", reason: "no_eval_candles" }] };
+  }
 
   if (!indicatorsCompleteForCandle(latestClosedEntry, entryIndicators)) {
     log(
       JSON.stringify({ event: "data_quality_gate", symbol: inst.canonicalSymbol, timeframe: "15m", candle: latestClosedEntry.datetimeUtc.toISOString(), reason: "missing_indicators" }),
       "scanner"
     );
-    return 0;
+    return { signalCount: 0, skippedFresh: false, rejections: [{ strategy: "ALL", reason: "missing_indicators" }] };
   }
 
   const stratResults = evaluateStrategies({
@@ -267,7 +328,7 @@ async function processInstrument(inst: Instrument): Promise<number> {
   });
 
   let signalCount = 0;
-  for (const result of stratResults) {
+  for (const result of stratResults.accepted) {
     const existing = await storage.findActiveSignal(inst.id, "15m", result.strategy, result.direction);
     if (existing) {
       continue;
@@ -294,7 +355,19 @@ async function processInstrument(inst: Instrument): Promise<number> {
 
   await storage.upsertScanProgress({ instrumentId: inst.id, timeframe: "15m", lastProcessedBarUtc: latestClosedEntry.datetimeUtc });
 
-  return signalCount;
+  return { signalCount, skippedFresh: false, rejections: stratResults.rejections };
+}
+
+async function getCachedCandles(
+  cache: Map<string, Candle[]> | undefined,
+  instrumentId: number,
+  timeframe: string
+): Promise<Candle[]> {
+  const key = `${instrumentId}:${timeframe}`;
+  if (cache?.has(key)) return cache.get(key)!;
+  const rows = await storage.getCandles(instrumentId, timeframe, 300);
+  cache?.set(key, rows);
+  return rows;
 }
 
 export async function resolveSignalOutcome(signalId: number, newStatus: string): Promise<void> {
@@ -306,12 +379,12 @@ export async function resolveSignalOutcome(signalId: number, newStatus: string):
   await storage.resolveSignal(signalId, newStatus, outcome.result, outcome.price);
 }
 
-export async function resolveActiveSignals(): Promise<number> {
-  const activeSignals = await storage.getExpiredNewSignals(0);
+export async function resolveActiveSignals(candleCache?: Map<string, Candle[]>): Promise<number> {
+  const activeSignals = await storage.getActiveSignalsOlderThan(0);
   let resolved = 0;
   for (const sig of activeSignals) {
     const reason = (sig.reasonJson ?? {}) as Record<string, any>;
-    const outcome = await determineOutcomeFromCandles(sig, reason);
+    const outcome = await determineOutcomeFromCandles(sig, reason, candleCache);
     if (outcome.result === "WIN" || outcome.result === "LOSS") {
       await storage.resolveSignal(sig.id, "EXPIRED", outcome.result, outcome.price);
       resolved++;
@@ -320,27 +393,31 @@ export async function resolveActiveSignals(): Promise<number> {
   return resolved;
 }
 
-export async function expireOldSignals(evalWindowMs?: number): Promise<number> {
+export async function expireOldSignals(evalWindowMs?: number, candleCache?: Map<string, Candle[]>): Promise<number> {
   const windowMs = evalWindowMs ?? 4 * 60 * 60 * 1000;
-  const expired = await storage.getExpiredNewSignals(windowMs);
+  const expired = await storage.getActiveSignalsOlderThan(windowMs);
   let count = 0;
   for (const sig of expired) {
     const reason = (sig.reasonJson ?? {}) as Record<string, any>;
-    const outcome = await determineOutcomeFromCandles(sig, reason);
+    const outcome = await determineOutcomeFromCandles(sig, reason, candleCache);
     await storage.resolveSignal(sig.id, "EXPIRED", outcome.result, outcome.price);
     count++;
   }
   return count;
 }
 
-async function determineOutcomeFromCandles(sig: { instrumentId: number; direction: string; detectedAt: Date | string; timeframe: string }, reason: Record<string, any>): Promise<{ result: string; price: number | null }> {
+async function determineOutcomeFromCandles(
+  sig: { instrumentId: number; direction: string; detectedAt: Date | string; timeframe: string },
+  reason: Record<string, any>,
+  candleCache?: Map<string, Candle[]>
+): Promise<{ result: string; price: number | null }> {
   const tp = reason.takeProfit as number | undefined;
   const sl = reason.stopLoss as number | undefined;
   const entry = reason.entryPrice as number | undefined;
   if (tp == null || sl == null || entry == null) return { result: "MISSED", price: null };
 
   const detectedMs = new Date(sig.detectedAt).getTime();
-  const candlesAfter = await storage.getCandles(sig.instrumentId, sig.timeframe, 300);
+  const candlesAfter = await getCachedCandles(candleCache, sig.instrumentId, sig.timeframe);
   const relevant = candlesAfter
     .filter((c) => c.datetimeUtc.getTime() > detectedMs)
     .sort((a, b) => a.datetimeUtc.getTime() - b.datetimeUtc.getTime());

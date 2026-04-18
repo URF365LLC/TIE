@@ -18,6 +18,10 @@ const settingsUpdateSchema = z.object({
   alertCooldownMinutes: z.number().int().min(1).max(1440).optional(),
   accountBalance: z.number().int().min(10000).max(500000).optional(),
   riskPercent: z.number().min(0.25).max(2).optional(),
+  signalEvalWindowHours: z.number().int().min(1).max(48).optional(),
+  tdCreditLimitPerMin: z.number().int().min(8).max(5000).optional(),
+  tdCreditTargetPerMin: z.number().int().min(8).max(5000).optional(),
+  tdMaxConcurrency: z.number().int().min(1).max(16).optional(),
 });
 
 export async function registerRoutes(

@@ -106,7 +106,7 @@ test("range breakout requires 2-candle follow-through", () => {
     entryTimeframe: "15m",
   });
 
-  assert.equal(results.some((r) => r.strategy === "RANGE_BREAKOUT"), true);
+  assert.equal(results.accepted.some((r) => r.strategy === "RANGE_BREAKOUT"), true);
 });
 
 test("minute boundary helper", () => {

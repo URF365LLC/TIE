@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { eq, and, desc, sql, ne, lt, inArray } from "drizzle-orm";
+import { eq, and, desc, sql, lt, inArray } from "drizzle-orm";
 import {
   instruments,
   candles,
@@ -47,6 +47,7 @@ export interface IStorage {
   getScanRuns(limit?: number): Promise<ScanRun[]>;
   createScanRun(data: InsertScanRun): Promise<ScanRun>;
   updateScanRun(id: number, data: Partial<ScanRun>): Promise<void>;
+  reconcileZombieScanRuns(): Promise<number>;
 
   getScanProgress(instrumentId: number, timeframe: string): Promise<ScanProgress | undefined>;
   upsertScanProgress(data: InsertScanProgress): Promise<void>;
@@ -55,7 +56,7 @@ export interface IStorage {
   getSignals(filters?: { strategy?: string; direction?: string; status?: string; activeOnly?: boolean; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]>;
   getArchivedSignals(filters?: { strategy?: string; direction?: string; outcome?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]>;
   findActiveSignal(instrumentId: number, timeframe: string, strategy: string, direction: string): Promise<Signal | undefined>;
-  getExpiredNewSignals(maxAgeMs: number): Promise<Signal[]>;
+  getActiveSignalsOlderThan(maxAgeMs: number): Promise<Signal[]>;
   upsertSignal(data: InsertSignal): Promise<Signal>;
   updateSignalStatus(id: number, status: string): Promise<void>;
   resolveSignal(id: number, status: string, outcome: string, outcomePrice: number | null): Promise<void>;
@@ -108,12 +109,24 @@ export class DatabaseStorage implements IStorage {
   }
 
   async bulkUpsertInstruments(data: InsertInstrument[]): Promise<number> {
-    let count = 0;
-    for (const item of data) {
-      await this.upsertInstrument(item);
-      count++;
+    if (!data.length) return 0;
+    let total = 0;
+    for (const batch of chunk(data, 200)) {
+      const result = await db
+        .insert(instruments)
+        .values(batch)
+        .onConflictDoUpdate({
+          target: instruments.canonicalSymbol,
+          set: {
+            vendorSymbol: sql`EXCLUDED.vendor_symbol`,
+            assetClass: sql`EXCLUDED.asset_class`,
+            updatedAt: sql`now()`,
+          },
+        })
+        .returning({ id: instruments.id });
+      total += result.length;
     }
-    return count;
+    return total;
   }
 
   async getCandles(instrumentId: number, timeframe: string, limit = 300): Promise<Candle[]> {
@@ -193,6 +206,19 @@ export class DatabaseStorage implements IStorage {
     await db.update(scanRuns).set(data).where(eq(scanRuns.id, id));
   }
 
+  async reconcileZombieScanRuns(): Promise<number> {
+    const result = await db
+      .update(scanRuns)
+      .set({
+        status: "aborted",
+        finishedAt: new Date(),
+        notes: sql`coalesce(${scanRuns.notes}, '') || ' [reconciled at startup]'`,
+      })
+      .where(eq(scanRuns.status, "running"))
+      .returning({ id: scanRuns.id });
+    return result.length;
+  }
+
   async getScanProgress(instrumentId: number, timeframe: string): Promise<ScanProgress | undefined> {
     const [row] = await db
       .select()
@@ -262,7 +288,7 @@ export class DatabaseStorage implements IStorage {
           eq(signals.timeframe, timeframe),
           eq(signals.strategy, strategy),
           eq(signals.direction, direction),
-          eq(signals.status, "NEW"),
+          inArray(signals.status, ["NEW", "ALERTED"]),
         )
       )
       .limit(1);
@@ -289,12 +315,12 @@ export class DatabaseStorage implements IStorage {
     await db.update(signals).set({ status, outcome, outcomePrice, resolvedAt: new Date() }).where(eq(signals.id, id));
   }
 
-  async getExpiredNewSignals(maxAgeMs: number): Promise<Signal[]> {
+  async getActiveSignalsOlderThan(maxAgeMs: number): Promise<Signal[]> {
     const cutoff = new Date(Date.now() - maxAgeMs);
     return db
       .select()
       .from(signals)
-      .where(and(eq(signals.status, "NEW"), lt(signals.detectedAt, cutoff)));
+      .where(and(inArray(signals.status, ["NEW", "ALERTED"]), lt(signals.detectedAt, cutoff)));
   }
 
   async getArchivedSignals(filters?: { strategy?: string; direction?: string; outcome?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]> {
@@ -322,39 +348,55 @@ export class DatabaseStorage implements IStorage {
 
   async getBacktestStats() {
     const archivedStatuses = ["EXPIRED", "TAKEN", "NOT_TAKEN"];
-    const rows = await db
-      .select()
+
+    const [overall] = await db
+      .select({
+        total: sql<number>`count(*)::int`,
+        wins: sql<number>`count(*) filter (where ${signals.outcome} = 'WIN')::int`,
+        losses: sql<number>`count(*) filter (where ${signals.outcome} = 'LOSS')::int`,
+        missed: sql<number>`count(*) filter (where ${signals.outcome} not in ('WIN','LOSS') or ${signals.outcome} is null)::int`,
+        takenTotal: sql<number>`count(*) filter (where ${signals.status} = 'TAKEN')::int`,
+        takenWins: sql<number>`count(*) filter (where ${signals.status} = 'TAKEN' and ${signals.outcome} = 'WIN')::int`,
+      })
       .from(signals)
       .where(inArray(signals.status, archivedStatuses));
 
-    let total = 0, wins = 0, losses = 0, missed = 0;
-    let takenTotal = 0, takenWins = 0;
+    const stratRows = await db
+      .select({
+        strategy: signals.strategy,
+        total: sql<number>`count(*)::int`,
+        wins: sql<number>`count(*) filter (where ${signals.outcome} = 'WIN')::int`,
+      })
+      .from(signals)
+      .where(inArray(signals.status, archivedStatuses))
+      .groupBy(signals.strategy);
+
+    const dirRows = await db
+      .select({
+        direction: signals.direction,
+        total: sql<number>`count(*)::int`,
+        wins: sql<number>`count(*) filter (where ${signals.outcome} = 'WIN')::int`,
+      })
+      .from(signals)
+      .where(inArray(signals.status, archivedStatuses))
+      .groupBy(signals.direction);
+
     const byStrategy: Record<string, { total: number; wins: number }> = {};
+    for (const r of stratRows) byStrategy[r.strategy] = { total: r.total, wins: r.wins };
+
     const byDirection: Record<string, { total: number; wins: number }> = {};
+    for (const r of dirRows) byDirection[r.direction] = { total: r.total, wins: r.wins };
 
-    for (const r of rows) {
-      total++;
-      if (r.outcome === "WIN") wins++;
-      else if (r.outcome === "LOSS") losses++;
-      else missed++;
-
-      if (r.status === "TAKEN") {
-        takenTotal++;
-        if (r.outcome === "WIN") takenWins++;
-      }
-
-      const strat = r.strategy;
-      if (!byStrategy[strat]) byStrategy[strat] = { total: 0, wins: 0 };
-      byStrategy[strat].total++;
-      if (r.outcome === "WIN") byStrategy[strat].wins++;
-
-      const dir = r.direction;
-      if (!byDirection[dir]) byDirection[dir] = { total: 0, wins: 0 };
-      byDirection[dir].total++;
-      if (r.outcome === "WIN") byDirection[dir].wins++;
-    }
-
-    return { total, wins, losses, missed, byStrategy, byDirection, takenWins, takenTotal };
+    return {
+      total: overall?.total ?? 0,
+      wins: overall?.wins ?? 0,
+      losses: overall?.losses ?? 0,
+      missed: overall?.missed ?? 0,
+      takenWins: overall?.takenWins ?? 0,
+      takenTotal: overall?.takenTotal ?? 0,
+      byStrategy,
+      byDirection,
+    };
   }
 
   async createAlertEvent(data: InsertAlertEvent): Promise<AlertEvent> {
@@ -421,23 +463,28 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getDashboardStats() {
-    const allInst = await db.select().from(instruments);
-    const enabledInst = allInst.filter((i) => i.enabled);
+    const [counts] = await db
+      .select({
+        totalInstruments: sql<number>`count(*)::int`,
+        enabledInstruments: sql<number>`count(*) filter (where ${instruments.enabled})::int`,
+      })
+      .from(instruments);
 
-    const [sigCount] = await db.select({ count: sql<number>`count(*)::int` }).from(signals);
-    const [newSigCount] = await db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(signals)
-      .where(eq(signals.status, "NEW"));
+    const [sigCounts] = await db
+      .select({
+        total: sql<number>`count(*)::int`,
+        newCount: sql<number>`count(*) filter (where ${signals.status} = 'NEW')::int`,
+      })
+      .from(signals);
 
     const lastScans = await db.select().from(scanRuns).orderBy(desc(scanRuns.startedAt)).limit(1);
     const s = await this.getSettings();
 
     return {
-      totalInstruments: allInst.length,
-      enabledInstruments: enabledInst.length,
-      totalSignals: sigCount.count,
-      newSignals: newSigCount.count,
+      totalInstruments: counts?.totalInstruments ?? 0,
+      enabledInstruments: counts?.enabledInstruments ?? 0,
+      totalSignals: sigCounts?.total ?? 0,
+      newSignals: sigCounts?.newCount ?? 0,
       lastScan: lastScans[0] ?? null,
       scanEnabled: s.scanEnabled,
     };
