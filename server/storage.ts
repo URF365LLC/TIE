@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { eq, and, desc, sql, lt, inArray } from "drizzle-orm";
+import { eq, and, desc, sql, lt, inArray, or, isNull } from "drizzle-orm";
 import {
   instruments,
   candles,
@@ -57,10 +57,12 @@ export interface IStorage {
   getArchivedSignals(filters?: { strategy?: string; direction?: string; outcome?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]>;
   findActiveSignal(instrumentId: number, timeframe: string, strategy: string, direction: string): Promise<Signal | undefined>;
   getActiveSignalsOlderThan(maxAgeMs: number): Promise<Signal[]>;
+  getUnresolvedSignals(maxAgeMs: number): Promise<Signal[]>;
   upsertSignal(data: InsertSignal): Promise<Signal>;
   updateSignalStatus(id: number, status: string): Promise<void>;
+  markSignalAction(id: number, status: string): Promise<void>;
   resolveSignal(id: number, status: string, outcome: string, outcomePrice: number | null): Promise<void>;
-  getBacktestStats(): Promise<{ total: number; wins: number; losses: number; missed: number; byStrategy: Record<string, { total: number; wins: number }>; byDirection: Record<string, { total: number; wins: number }>;  takenWins: number; takenTotal: number }>;
+  getBacktestStats(): Promise<{ total: number; resolvedTotal: number; wins: number; losses: number; missed: number; unresolved: number; byStrategy: Record<string, { total: number; wins: number; losses: number }>; byDirection: Record<string, { total: number; wins: number; losses: number }>; takenWins: number; takenTotal: number; takenResolved: number }>;
 
   createAlertEvent(data: InsertAlertEvent): Promise<AlertEvent>;
 
@@ -311,8 +313,26 @@ export class DatabaseStorage implements IStorage {
     await db.update(signals).set({ status }).where(eq(signals.id, id));
   }
 
+  // Records a user's TAKEN/NOT_TAKEN decision without finalizing the outcome.
+  // Leaves outcome/resolvedAt untouched so the scanner can still resolve TP/SL hits later.
+  async markSignalAction(id: number, status: string): Promise<void> {
+    await db.update(signals).set({ status }).where(eq(signals.id, id));
+  }
+
+  // Concurrency-safe: if the row's current status is already TAKEN/NOT_TAKEN
+  // (i.e. the user clicked between when the scanner read the row and when it
+  // writes back), preserve that user decision. Done in SQL so we don't lose to
+  // a stale in-memory read.
   async resolveSignal(id: number, status: string, outcome: string, outcomePrice: number | null): Promise<void> {
-    await db.update(signals).set({ status, outcome, outcomePrice, resolvedAt: new Date() }).where(eq(signals.id, id));
+    await db
+      .update(signals)
+      .set({
+        status: sql`case when ${signals.status} in ('TAKEN','NOT_TAKEN') then ${signals.status} else ${status} end`,
+        outcome,
+        outcomePrice,
+        resolvedAt: new Date(),
+      })
+      .where(eq(signals.id, id));
   }
 
   async getActiveSignalsOlderThan(maxAgeMs: number): Promise<Signal[]> {
@@ -323,12 +343,40 @@ export class DatabaseStorage implements IStorage {
       .where(and(inArray(signals.status, ["NEW", "ALERTED"]), lt(signals.detectedAt, cutoff)));
   }
 
+  // Returns every signal that has not yet had its outcome decided by price.
+  // This is the union of (a) NEW/ALERTED awaiting resolution and (b) TAKEN/NOT_TAKEN
+  // signals the user has acted on but where TP/SL has not yet been hit. Both groups
+  // continue to be monitored each tick so "Your Win Rate" can pick up later resolutions.
+  async getUnresolvedSignals(maxAgeMs: number): Promise<Signal[]> {
+    const cutoff = new Date(Date.now() - maxAgeMs);
+    return db
+      .select()
+      .from(signals)
+      .where(
+        and(
+          lt(signals.detectedAt, cutoff),
+          or(
+            inArray(signals.status, ["NEW", "ALERTED"]),
+            and(inArray(signals.status, ["TAKEN", "NOT_TAKEN"]), isNull(signals.outcome)),
+          ),
+        ),
+      );
+  }
+
   async getArchivedSignals(filters?: { strategy?: string; direction?: string; outcome?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]> {
     const archivedStatuses = ["EXPIRED", "TAKEN", "NOT_TAKEN"];
     const conditions = [inArray(signals.status, archivedStatuses)];
     if (filters?.strategy) conditions.push(eq(signals.strategy, filters.strategy));
     if (filters?.direction) conditions.push(eq(signals.direction, filters.direction));
-    if (filters?.outcome) conditions.push(eq(signals.outcome!, filters.outcome));
+    if (filters?.outcome) {
+      // "PENDING" is the UI label for archived signals whose outcome hasn't been
+      // decided by price yet (TAKEN/NOT_TAKEN with NULL outcome). Map it to IS NULL.
+      if (filters.outcome === "PENDING") {
+        conditions.push(isNull(signals.outcome));
+      } else {
+        conditions.push(eq(signals.outcome!, filters.outcome));
+      }
+    }
     if (filters?.symbol) {
       const inst = await this.getInstrumentBySymbol(filters.symbol);
       if (inst) conditions.push(eq(signals.instrumentId, inst.id));
@@ -340,7 +388,7 @@ export class DatabaseStorage implements IStorage {
       .from(signals)
       .innerJoin(instruments, eq(signals.instrumentId, instruments.id))
       .where(and(...conditions))
-      .orderBy(desc(signals.resolvedAt))
+      .orderBy(sql`${signals.resolvedAt} desc nulls last`, desc(signals.detectedAt))
       .limit(filters?.limit ?? 200);
 
     return rows.map((r) => ({ ...r.signals, instrument: r.instruments }));
@@ -354,8 +402,14 @@ export class DatabaseStorage implements IStorage {
         total: sql<number>`count(*)::int`,
         wins: sql<number>`count(*) filter (where ${signals.outcome} = 'WIN')::int`,
         losses: sql<number>`count(*) filter (where ${signals.outcome} = 'LOSS')::int`,
-        missed: sql<number>`count(*) filter (where ${signals.outcome} not in ('WIN','LOSS') or ${signals.outcome} is null)::int`,
+        // MISSED = scanner gave up after the eval window (outcome explicitly set to MISSED)
+        // UNRESOLVED = TAKEN/NOT_TAKEN that the scanner is still monitoring (outcome NULL)
+        missed: sql<number>`count(*) filter (where ${signals.outcome} = 'MISSED')::int`,
+        unresolved: sql<number>`count(*) filter (where ${signals.outcome} is null)::int`,
+        // takenTotal/takenResolved: only count TAKEN signals that have actually resolved
+        // to WIN or LOSS so the displayed "Your Win Rate" isn't diluted by unresolved trades.
         takenTotal: sql<number>`count(*) filter (where ${signals.status} = 'TAKEN')::int`,
+        takenResolved: sql<number>`count(*) filter (where ${signals.status} = 'TAKEN' and ${signals.outcome} in ('WIN','LOSS'))::int`,
         takenWins: sql<number>`count(*) filter (where ${signals.status} = 'TAKEN' and ${signals.outcome} = 'WIN')::int`,
       })
       .from(signals)
@@ -366,6 +420,7 @@ export class DatabaseStorage implements IStorage {
         strategy: signals.strategy,
         total: sql<number>`count(*)::int`,
         wins: sql<number>`count(*) filter (where ${signals.outcome} = 'WIN')::int`,
+        losses: sql<number>`count(*) filter (where ${signals.outcome} = 'LOSS')::int`,
       })
       .from(signals)
       .where(inArray(signals.status, archivedStatuses))
@@ -376,24 +431,29 @@ export class DatabaseStorage implements IStorage {
         direction: signals.direction,
         total: sql<number>`count(*)::int`,
         wins: sql<number>`count(*) filter (where ${signals.outcome} = 'WIN')::int`,
+        losses: sql<number>`count(*) filter (where ${signals.outcome} = 'LOSS')::int`,
       })
       .from(signals)
       .where(inArray(signals.status, archivedStatuses))
       .groupBy(signals.direction);
 
-    const byStrategy: Record<string, { total: number; wins: number }> = {};
-    for (const r of stratRows) byStrategy[r.strategy] = { total: r.total, wins: r.wins };
+    const byStrategy: Record<string, { total: number; wins: number; losses: number }> = {};
+    for (const r of stratRows) byStrategy[r.strategy] = { total: r.total, wins: r.wins, losses: r.losses };
 
-    const byDirection: Record<string, { total: number; wins: number }> = {};
-    for (const r of dirRows) byDirection[r.direction] = { total: r.total, wins: r.wins };
+    const byDirection: Record<string, { total: number; wins: number; losses: number }> = {};
+    for (const r of dirRows) byDirection[r.direction] = { total: r.total, wins: r.wins, losses: r.losses };
 
     return {
       total: overall?.total ?? 0,
+      // resolvedTotal = wins+losses; the meaningful denominator for "win rate when the trade resolves"
+      resolvedTotal: (overall?.wins ?? 0) + (overall?.losses ?? 0),
       wins: overall?.wins ?? 0,
       losses: overall?.losses ?? 0,
       missed: overall?.missed ?? 0,
+      unresolved: overall?.unresolved ?? 0,
       takenWins: overall?.takenWins ?? 0,
       takenTotal: overall?.takenTotal ?? 0,
+      takenResolved: overall?.takenResolved ?? 0,
       byStrategy,
       byDirection,
     };

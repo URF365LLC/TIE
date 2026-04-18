@@ -69,3 +69,11 @@ Analysis-only trading intelligence platform that scans markets using Twelve Data
 ## Strategies
 1. **TREND_CONTINUATION** - Uses 1h bias (EMA200 slope) + 15m entry (EMA stack, pullback, MACD, ADX>=18)
 2. **RANGE_BREAKOUT** - ADX<=18, narrow BB width, breakout above/below range with BB confirmation
+
+## Signal Lifecycle
+- **status**: NEW (default) → ALERTED (email sent) → EXPIRED (scanner gave up) | TAKEN | NOT_TAKEN (user actions)
+- **outcome**: NULL → WIN | LOSS | MISSED (only set by scanner from price action)
+- Each scanner tick runs `runScanCycle` first (fresh candles), then `resolveActiveSignals` (TP/SL hits become WIN/LOSS, status preserved for TAKEN/NOT_TAKEN), then `expireOldSignals` (past `signalEvalWindowHours` window → MISSED).
+- User TAKEN/NOT_TAKEN: records the decision via `markSignalAction`. Outcome stays NULL until price hits TP/SL or the window elapses, so "Your Win Rate" reflects real resolutions.
+- `getUnresolvedSignals` is the union of NEW/ALERTED + TAKEN/NOT_TAKEN with NULL outcome — these are what the scanner monitors each tick.
+- Backtest win rate = wins / (wins + losses); MISSED is excluded from the denominator and shown separately.

@@ -11,13 +11,16 @@ import type { SignalWithInstrument, Settings } from "@shared/schema";
 
 interface BacktestStats {
   total: number;
+  resolvedTotal: number;
   wins: number;
   losses: number;
   missed: number;
-  byStrategy: Record<string, { total: number; wins: number }>;
-  byDirection: Record<string, { total: number; wins: number }>;
+  unresolved: number;
+  byStrategy: Record<string, { total: number; wins: number; losses: number }>;
+  byDirection: Record<string, { total: number; wins: number; losses: number }>;
   takenWins: number;
   takenTotal: number;
+  takenResolved: number;
 }
 
 export default function BacktestPage() {
@@ -44,8 +47,10 @@ export default function BacktestPage() {
   const { data: settings } = useQuery<Settings>({ queryKey: ["/api/settings"] });
 
   const hasFilters = strategyFilter !== "all" || directionFilter !== "all" || outcomeFilter !== "all";
-  const winRate = stats && stats.total > 0 ? ((stats.wins / stats.total) * 100).toFixed(1) : "—";
-  const takenWinRate = stats && stats.takenTotal > 0 ? ((stats.takenWins / stats.takenTotal) * 100).toFixed(1) : "—";
+  // Win rate is wins / (wins + losses): MISSED signals didn't reach a verdict so they
+  // tell us nothing about strategy edge and should not dilute the percentage.
+  const winRate = stats && stats.resolvedTotal > 0 ? ((stats.wins / stats.resolvedTotal) * 100).toFixed(1) : "—";
+  const takenWinRate = stats && stats.takenResolved > 0 ? ((stats.takenWins / stats.takenResolved) * 100).toFixed(1) : "—";
 
   return (
     <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto">
@@ -58,7 +63,7 @@ export default function BacktestPage() {
         <StatCard
           title="Win Rate"
           value={statsLoading ? undefined : `${winRate}%`}
-          subtitle={stats ? `${stats.wins}W / ${stats.losses}L / ${stats.missed}M` : ""}
+          subtitle={stats ? `${stats.wins}W / ${stats.losses}L / ${stats.missed}M${stats.unresolved > 0 ? ` · ${stats.unresolved} pending` : ""}` : ""}
           icon={<Percent className="w-4 h-4" />}
           loading={statsLoading}
           highlight={stats ? stats.wins > stats.losses : false}
@@ -73,7 +78,7 @@ export default function BacktestPage() {
         <StatCard
           title="Your Win Rate"
           value={statsLoading ? undefined : `${takenWinRate}%`}
-          subtitle={stats ? `${stats.takenWins}W / ${stats.takenTotal} taken` : ""}
+          subtitle={stats ? `${stats.takenWins}W / ${stats.takenResolved} resolved · ${stats.takenTotal} taken` : ""}
           icon={<Target className="w-4 h-4" />}
           loading={statsLoading}
           highlight={stats ? stats.takenWins > 0 : false}
@@ -90,7 +95,8 @@ export default function BacktestPage() {
       {stats && Object.keys(stats.byStrategy).length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {Object.entries(stats.byStrategy).map(([strat, data]) => {
-            const wr = data.total > 0 ? ((data.wins / data.total) * 100).toFixed(1) : "0";
+            const resolved = data.wins + data.losses;
+            const wr = resolved > 0 ? ((data.wins / resolved) * 100).toFixed(1) : "0";
             return (
               <Card key={strat} data-testid={`strategy-card-${strat.toLowerCase()}`}>
                 <CardContent className="p-4">
@@ -105,14 +111,15 @@ export default function BacktestPage() {
                   </div>
                   <div className="flex items-center gap-2 mt-2">
                     <ProgressBar value={parseFloat(wr)} />
-                    <span className="text-xs text-muted-foreground whitespace-nowrap">{data.wins}/{data.total}</span>
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">{data.wins}/{resolved} · {data.total} total</span>
                   </div>
                 </CardContent>
               </Card>
             );
           })}
           {Object.entries(stats.byDirection).map(([dir, data]) => {
-            const wr = data.total > 0 ? ((data.wins / data.total) * 100).toFixed(1) : "0";
+            const resolved = data.wins + data.losses;
+            const wr = resolved > 0 ? ((data.wins / resolved) * 100).toFixed(1) : "0";
             return (
               <Card key={dir} data-testid={`direction-card-${dir.toLowerCase()}`}>
                 <CardContent className="p-4">
@@ -126,7 +133,7 @@ export default function BacktestPage() {
                   </div>
                   <div className="flex items-center gap-2 mt-2">
                     <ProgressBar value={parseFloat(wr)} />
-                    <span className="text-xs text-muted-foreground whitespace-nowrap">{data.wins}/{data.total}</span>
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">{data.wins}/{resolved} · {data.total} total</span>
                   </div>
                 </CardContent>
               </Card>
@@ -185,6 +192,7 @@ export default function BacktestPage() {
                 <SelectItem value="WIN">Win</SelectItem>
                 <SelectItem value="LOSS">Loss</SelectItem>
                 <SelectItem value="MISSED">Missed</SelectItem>
+                <SelectItem value="PENDING">Pending</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -245,7 +253,7 @@ export default function BacktestPage() {
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <ScoreBadge score={sig.score} />
-                      <OutcomeBadge outcome={sig.outcome ?? "MISSED"} />
+                      <OutcomeBadge outcome={sig.outcome ?? "PENDING"} />
                     </div>
                   </div>
                 );
@@ -327,6 +335,7 @@ function OutcomeBadge({ outcome }: { outcome: string }) {
     WIN: { color: "bg-emerald-500/10 text-emerald-500 dark:bg-emerald-500/20", icon: <Trophy className="w-3 h-3" /> },
     LOSS: { color: "bg-red-500/10 text-red-500 dark:bg-red-500/20", icon: <XCircle className="w-3 h-3" /> },
     MISSED: { color: "bg-muted text-muted-foreground", icon: <HelpCircle className="w-3 h-3" /> },
+    PENDING: { color: "bg-amber-500/10 text-amber-500 dark:bg-amber-500/20", icon: <HelpCircle className="w-3 h-3" /> },
   };
   const c = config[outcome] || config.MISSED;
   return (

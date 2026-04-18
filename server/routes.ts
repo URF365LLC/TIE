@@ -165,7 +165,10 @@ export async function registerRoutes(
     const filters: any = {};
     if (req.query.strategy) filters.strategy = req.query.strategy;
     if (req.query.direction) filters.direction = req.query.direction;
-    if (req.query.outcome) filters.outcome = req.query.outcome;
+    if (req.query.outcome) {
+      const o = String(req.query.outcome);
+      if (["WIN", "LOSS", "MISSED", "PENDING"].includes(o)) filters.outcome = o;
+    }
     if (req.query.symbol) filters.symbol = req.query.symbol;
     if (req.query.limit) filters.limit = parseInt(req.query.limit as string);
     const signals = await storage.getArchivedSignals(filters);

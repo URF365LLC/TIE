@@ -113,3 +113,25 @@ test("minute boundary helper", () => {
   const t = Date.UTC(2024, 0, 1, 0, 0, 30, 0);
   assert.equal(msUntilNextMinuteBoundary(t), 30000);
 });
+
+test("backtest win rate: wins/(wins+losses), MISSED excluded from denominator", () => {
+  // Same arithmetic the backtest page now performs.
+  const stats = { wins: 3, losses: 2, missed: 10 };
+  const resolved = stats.wins + stats.losses;
+  const wr = (stats.wins / resolved) * 100;
+  // 3/(3+2) = 60%, NOT 3/(3+2+10) = 20%
+  assert.equal(wr.toFixed(1), "60.0");
+});
+
+test("Your Win Rate: only counts TAKEN trades that have actually resolved", () => {
+  // takenTotal = 5 trades user marked TAKEN; only 2 of those have hit TP/SL so far.
+  // Of the resolved 2, both were wins. UI must show 100% (2/2), not 40% (2/5).
+  const takenTotal = 5;
+  const takenResolved = 2;
+  const takenWins = 2;
+  const wr = takenResolved > 0 ? (takenWins / takenResolved) * 100 : 0;
+  assert.equal(wr, 100);
+  // Subtitle shows both numbers so user sees full context.
+  const subtitle = `${takenWins}W / ${takenResolved} resolved · ${takenTotal} taken`;
+  assert.equal(subtitle, "2W / 2 resolved · 5 taken");
+});

@@ -83,7 +83,13 @@ function scheduleNextTick(): void {
 async function tick(): Promise<void> {
   const settings = await storage.getSettings();
 
+  // Run the scan FIRST so that resolution checks the freshest possible candles.
+  if (settings.scanEnabled && !isScanning) {
+    await runScanCycle("15m", settings.maxSymbolsPerBurst, settings.burstSleepMs);
+  }
+
   // Per-tick candle cache shared by resolveActiveSignals and expireOldSignals to avoid N+1 reads.
+  // Built AFTER the scan so newly-fetched candles are visible.
   const candleCache = new Map<string, Candle[]>();
 
   try {
@@ -103,12 +109,6 @@ async function tick(): Promise<void> {
     }
   } catch (err: any) {
     log(`Error expiring signals: ${err.message}`, "scanner");
-  }
-
-  if (!settings.scanEnabled) return;
-
-  if (!isScanning) {
-    await runScanCycle("15m", settings.maxSymbolsPerBurst, settings.burstSleepMs);
   }
 }
 
@@ -374,23 +374,36 @@ async function getCachedCandles(
   return rows;
 }
 
+// Called when the user clicks Taken / Not Taken. Records the user's decision (status)
+// and, if TP/SL has already been hit by the time of the click, also captures the outcome.
+// Otherwise the signal stays in the "unresolved" pool so future scanner ticks can still
+// detect a real WIN/LOSS — this is what makes "Your Win Rate" accurate.
 export async function resolveSignalOutcome(signalId: number, newStatus: string): Promise<void> {
   const sig = await storage.getSignalById(signalId);
   if (!sig) return;
 
   const reason = (sig.reasonJson ?? {}) as Record<string, any>;
   const outcome = await determineOutcomeFromCandles(sig, reason);
-  await storage.resolveSignal(signalId, newStatus, outcome.result, outcome.price);
+  if (outcome.result === "WIN" || outcome.result === "LOSS") {
+    await storage.resolveSignal(signalId, newStatus, outcome.result, outcome.price);
+  } else {
+    // Not yet resolved by price — only record the user's decision, leave outcome NULL
+    // so resolveActiveSignals can finalize it on a future tick.
+    await storage.markSignalAction(signalId, newStatus);
+  }
 }
 
 export async function resolveActiveSignals(candleCache?: Map<string, Candle[]>): Promise<number> {
-  const activeSignals = await storage.getActiveSignalsOlderThan(0);
+  // Includes NEW/ALERTED plus any TAKEN/NOT_TAKEN that haven't yet seen a TP/SL hit.
+  const activeSignals = await storage.getUnresolvedSignals(0);
   let resolved = 0;
   for (const sig of activeSignals) {
     const reason = (sig.reasonJson ?? {}) as Record<string, any>;
     const outcome = await determineOutcomeFromCandles(sig, reason, candleCache);
     if (outcome.result === "WIN" || outcome.result === "LOSS") {
-      await storage.resolveSignal(sig.id, "EXPIRED", outcome.result, outcome.price);
+      // Preserve the user's decision (TAKEN/NOT_TAKEN); only auto-promote NEW/ALERTED → EXPIRED.
+      const newStatus = sig.status === "NEW" || sig.status === "ALERTED" ? "EXPIRED" : sig.status;
+      await storage.resolveSignal(sig.id, newStatus, outcome.result, outcome.price);
       resolved++;
     }
   }
@@ -399,12 +412,14 @@ export async function resolveActiveSignals(candleCache?: Map<string, Candle[]>):
 
 export async function expireOldSignals(evalWindowMs?: number, candleCache?: Map<string, Candle[]>): Promise<number> {
   const windowMs = evalWindowMs ?? 4 * 60 * 60 * 1000;
-  const expired = await storage.getActiveSignalsOlderThan(windowMs);
+  const expired = await storage.getUnresolvedSignals(windowMs);
   let count = 0;
   for (const sig of expired) {
     const reason = (sig.reasonJson ?? {}) as Record<string, any>;
     const outcome = await determineOutcomeFromCandles(sig, reason, candleCache);
-    await storage.resolveSignal(sig.id, "EXPIRED", outcome.result, outcome.price);
+    const finalOutcome = outcome.result === "WIN" || outcome.result === "LOSS" ? outcome.result : "MISSED";
+    const newStatus = sig.status === "NEW" || sig.status === "ALERTED" ? "EXPIRED" : sig.status;
+    await storage.resolveSignal(sig.id, newStatus, finalOutcome, outcome.price);
     count++;
   }
   return count;
