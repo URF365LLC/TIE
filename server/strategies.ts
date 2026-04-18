@@ -1,4 +1,5 @@
-import type { Candle, Indicator } from "@shared/schema";
+import type { Candle, Indicator, StrategyParamsConfig } from "@shared/schema";
+import { DEFAULT_STRATEGY_PARAMS } from "@shared/schema";
 
 interface StrategyInput {
   instrumentId: number;
@@ -7,6 +8,7 @@ interface StrategyInput {
   biasCandles: Candle[];
   biasIndicators: Indicator[];
   entryTimeframe: string;
+  params?: StrategyParamsConfig;
 }
 
 export interface StrategyResult {
@@ -49,14 +51,15 @@ export function hasRequiredIndicators(ind: Indicator | undefined): boolean {
 }
 
 export function evaluateStrategies(input: StrategyInput): StrategyEvaluation {
+  const params = input.params ?? DEFAULT_STRATEGY_PARAMS;
   const accepted: StrategyResult[] = [];
   const rejections: StrategyRejection[] = [];
 
-  const trend = evaluateTrendContinuation(input);
+  const trend = evaluateTrendContinuation(input, params.trendContinuation);
   if ("score" in trend) accepted.push(trend);
   else rejections.push(trend);
 
-  const breakout = evaluateRangeBreakout(input);
+  const breakout = evaluateRangeBreakout(input, params.rangeBreakout);
   if ("score" in breakout) accepted.push(breakout);
   else rejections.push(breakout);
 
@@ -67,7 +70,10 @@ function reject(strategy: string, reason: string, details?: Record<string, any>)
   return { strategy, reason, details };
 }
 
-function evaluateTrendContinuation(input: StrategyInput): StrategyResult | StrategyRejection {
+function evaluateTrendContinuation(
+  input: StrategyInput,
+  params: StrategyParamsConfig["trendContinuation"],
+): StrategyResult | StrategyRejection {
   const { biasIndicators, entryCandles, entryIndicators } = input;
   const STRAT = "TREND_CONTINUATION";
 
@@ -121,10 +127,11 @@ function evaluateTrendContinuation(input: StrategyInput): StrategyResult | Strat
 
   const ema21Val = latestEntry.ema21!;
   const ema55Val = latestEntry.ema55!;
+  const tol = params.pullbackTolerance;
   const pullbackZone =
     direction === "LONG"
-      ? (prevClosed.low <= ema21Val * 1.002 || prevClosed.low <= ema55Val * 1.005) && latestClosed.close > ema21Val
-      : (prevClosed.high >= ema21Val * 0.998 || prevClosed.high >= ema55Val * 0.995) && latestClosed.close < ema21Val;
+      ? (prevClosed.low <= ema21Val * (1 + tol) || prevClosed.low <= ema55Val * (1 + tol * 2.5)) && latestClosed.close > ema21Val
+      : (prevClosed.high >= ema21Val * (1 - tol) || prevClosed.high >= ema55Val * (1 - tol * 2.5)) && latestClosed.close < ema21Val;
 
   if (pullbackZone) {
     score += 20;
@@ -137,38 +144,42 @@ function evaluateTrendContinuation(input: StrategyInput): StrategyResult | Strat
     reasons.macd = "histogram confirms direction";
   }
 
-  if (latestEntry.adx! >= 18) {
+  if (latestEntry.adx! >= params.adxThreshold) {
     score += 20;
     reasons.adx = `trending (${latestEntry.adx!.toFixed(1)})`;
   }
 
   const entryPrice = latestClosed.close;
   const atr = latestEntry.atr!;
-  const stopDist = 1.2 * atr;
+  const stopDist = params.atrStopMultiplier * atr;
   const stopLoss = direction === "LONG" ? entryPrice - stopDist : entryPrice + stopDist;
-  const takeProfit = direction === "LONG" ? entryPrice + stopDist * 2 : entryPrice - stopDist * 2;
+  const takeProfit = direction === "LONG" ? entryPrice + stopDist * params.riskRewardRatio : entryPrice - stopDist * params.riskRewardRatio;
 
   reasons.entryPrice = parseFloat(entryPrice.toFixed(5));
   reasons.stopLoss = parseFloat(stopLoss.toFixed(5));
   reasons.takeProfit = parseFloat(takeProfit.toFixed(5));
   reasons.atr = parseFloat(atr.toFixed(5));
   reasons.stopDistance = parseFloat(stopDist.toFixed(5));
-  reasons.riskRewardRatio = "1:2";
+  reasons.riskRewardRatio = `1:${params.riskRewardRatio}`;
   reasons.ema21Zone = parseFloat(ema21Val.toFixed(5));
   reasons.ema55Zone = parseFloat(ema55Val.toFixed(5));
 
-  if (score < 40) {
-    return reject(STRAT, "score_below_threshold", { score, threshold: 40, partialReasons: reasons });
+  if (score < params.scoreThreshold) {
+    return reject(STRAT, "score_below_threshold", { score, threshold: params.scoreThreshold, partialReasons: reasons });
   }
 
   return { strategy: STRAT, direction, score: Math.min(score, 100), reasonJson: reasons };
 }
 
-function evaluateRangeBreakout(input: StrategyInput): StrategyResult | StrategyRejection {
+function evaluateRangeBreakout(
+  input: StrategyInput,
+  params: StrategyParamsConfig["rangeBreakout"],
+): StrategyResult | StrategyRejection {
   const { entryCandles, entryIndicators } = input;
   const STRAT = "RANGE_BREAKOUT";
+  const lookback = params.rangeLookbackBars;
 
-  if (entryCandles.length < 24 || entryIndicators.length < 50) {
+  if (entryCandles.length < lookback + 4 || entryIndicators.length < 50) {
     return reject(STRAT, "insufficient_data", { entryCandles: entryCandles.length, entryIndicators: entryIndicators.length });
   }
 
@@ -179,8 +190,8 @@ function evaluateRangeBreakout(input: StrategyInput): StrategyResult | StrategyR
     return reject(STRAT, "incomplete_entry_indicators");
   }
 
-  if (latestInd.adx! > 18) {
-    return reject(STRAT, "adx_above_ceiling", { adx: latestInd.adx, ceiling: 18 });
+  if (latestInd.adx! > params.adxCeiling) {
+    return reject(STRAT, "adx_above_ceiling", { adx: latestInd.adx, ceiling: params.adxCeiling });
   }
 
   const bbWidths = entryIndicators.slice(0, 50).map((i) => i.bbWidth).filter((w): w is number => w != null);
@@ -188,22 +199,23 @@ function evaluateRangeBreakout(input: StrategyInput): StrategyResult | StrategyR
     return reject(STRAT, "insufficient_bbwidth_history");
   }
   const sorted = [...bbWidths].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  if (latestInd.bbWidth! >= median) {
-    return reject(STRAT, "bbwidth_not_compressed", { current: latestInd.bbWidth, median });
+  const pctIdx = Math.min(sorted.length - 1, Math.floor(sorted.length * (params.bbWidthPercentile / 100)));
+  const threshold = sorted[pctIdx];
+  if (latestInd.bbWidth! >= threshold) {
+    return reject(STRAT, "bbwidth_not_compressed", { current: latestInd.bbWidth, threshold, percentile: params.bbWidthPercentile });
   }
 
-  const baseRange = entryCandles.slice(2, 22);
+  const baseRange = entryCandles.slice(2, 2 + lookback);
   const rangeHigh = Math.max(...baseRange.map((c) => c.high));
   const rangeLow = Math.min(...baseRange.map((c) => c.low));
 
   const atr = latestInd.atr!;
-  const stopDist = 1.2 * atr;
+  const stopDist = params.atrStopMultiplier * atr;
 
   const reasons: Record<string, any> = {
     adx: parseFloat(latestInd.adx!.toFixed(1)),
     bbWidth: parseFloat(latestInd.bbWidth!.toFixed(5)),
-    medianBBWidth: parseFloat(median.toFixed(5)),
+    medianBBWidth: parseFloat(threshold.toFixed(5)),
     rangeHigh: parseFloat(rangeHigh.toFixed(5)),
     rangeLow: parseFloat(rangeLow.toFixed(5)),
     atr: parseFloat(atr.toFixed(5)),
@@ -239,12 +251,12 @@ function evaluateRangeBreakout(input: StrategyInput): StrategyResult | StrategyR
 
   const entryPrice = latestClosed.close;
   const stopLoss = direction === "LONG" ? entryPrice - stopDist : entryPrice + stopDist;
-  const takeProfit = direction === "LONG" ? entryPrice + stopDist * 2 : entryPrice - stopDist * 2;
+  const takeProfit = direction === "LONG" ? entryPrice + stopDist * params.riskRewardRatio : entryPrice - stopDist * params.riskRewardRatio;
 
   reasons.entryPrice = parseFloat(entryPrice.toFixed(5));
   reasons.stopLoss = parseFloat(stopLoss.toFixed(5));
   reasons.takeProfit = parseFloat(takeProfit.toFixed(5));
-  reasons.riskRewardRatio = "1:2";
+  reasons.riskRewardRatio = `1:${params.riskRewardRatio}`;
 
   return { strategy: STRAT, direction, score: Math.min(score, 100), reasonJson: reasons };
 }

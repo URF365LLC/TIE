@@ -6,6 +6,31 @@ import { WHITELIST, canonicalToVendor } from "@shared/schema";
 import { log } from "./logger";
 import { z } from "zod";
 import { analyzePortfolio, analyzeTradeDeep, batchAnalyzeTrades, generateStrategyGuide, generateStrategyOptimizer } from "./advisor";
+import { insertStrategyParametersSchema, type StrategyParamsConfig } from "@shared/schema";
+import { summarizeSignal } from "./summary";
+
+const journalSchema = z.object({
+  notes: z.string().max(5000).nullable().optional(),
+  confidence: z.number().int().min(1).max(5).nullable().optional(),
+  tags: z.array(z.string().max(40)).max(20).nullable().optional(),
+});
+
+const strategyParamsConfigSchema = z.object({
+  trendContinuation: z.object({
+    adxThreshold: z.number().min(0).max(100),
+    atrStopMultiplier: z.number().min(0.1).max(10),
+    riskRewardRatio: z.number().min(0.5).max(10),
+    scoreThreshold: z.number().int().min(0).max(100),
+    pullbackTolerance: z.number().min(0).max(0.1),
+  }),
+  rangeBreakout: z.object({
+    adxCeiling: z.number().min(0).max(100),
+    bbWidthPercentile: z.number().min(1).max(99),
+    rangeLookbackBars: z.number().int().min(5).max(200),
+    atrStopMultiplier: z.number().min(0.1).max(10),
+    riskRewardRatio: z.number().min(0.5).max(10),
+  }),
+});
 
 const settingsUpdateSchema = z.object({
   scanEnabled: z.boolean().optional(),
@@ -253,6 +278,123 @@ export async function registerRoutes(
       const analysis = await storage.getTradeAnalysis(signalId);
       if (!analysis) return res.status(404).json({ message: "No analysis found for this signal" });
       res.json(analysis);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // ─── Learning Infrastructure: signal journaling ───────────────────────────
+  app.patch("/api/signals/:id/journal", async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "invalid id" });
+    const parsed = journalSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid journal payload", errors: parsed.error.flatten() });
+    }
+    try {
+      const updated = await storage.updateSignalJournal(id, parsed.data);
+      if (!updated) return res.status(404).json({ message: "signal not found" });
+      res.json(updated);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // ─── Learning Infrastructure: versioned strategy parameters ───────────────
+  app.get("/api/strategy-parameters", async (_req, res) => {
+    const rows = await storage.listStrategyParameters();
+    const active = await storage.getActiveStrategyParameters();
+    res.json({ activeId: active.id, activeVersion: active.version, parameters: rows });
+  });
+
+  app.post("/api/strategy-parameters", async (req, res) => {
+    const schema = z.object({
+      name: z.string().min(1).max(100),
+      description: z.string().max(2000).optional(),
+      params: strategyParamsConfigSchema,
+      activate: z.boolean().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid payload", errors: parsed.error.flatten() });
+    }
+    try {
+      const all = await storage.listStrategyParameters();
+      const nextVersion = all.length === 0 ? 1 : Math.max(...all.map((r) => r.version)) + 1;
+      const row = await storage.createStrategyParameters({
+        version: nextVersion,
+        name: parsed.data.name,
+        description: parsed.data.description,
+        isActive: false,
+        params: parsed.data.params as unknown as StrategyParamsConfig,
+      });
+      const final = parsed.data.activate ? await storage.setActiveStrategyParameters(row.id) : row;
+      res.status(201).json(final);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.post("/api/strategy-parameters/:id/activate", async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "invalid id" });
+    try {
+      const row = await storage.setActiveStrategyParameters(id);
+      res.json(row);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // ─── Learning Infrastructure: performance analytics ───────────────────────
+  app.get("/api/analytics/performance", async (req, res) => {
+    const allowed = ["pair", "strategy", "direction", "asset", "session", "hour"] as const;
+    const groupBy = (req.query.groupBy as string) || "pair";
+    if (!allowed.includes(groupBy as any)) {
+      return res.status(400).json({ message: `groupBy must be one of: ${allowed.join(", ")}` });
+    }
+    try {
+      const rows = await storage.getPerformanceAggregates(groupBy as (typeof allowed)[number]);
+      res.json({ groupBy, rows });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // ─── Learning Infrastructure: scan-rejection telemetry per scan ───────────
+  app.get("/api/scan/runs/:id", async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "invalid id" });
+    const run = await storage.getScanRunById(id);
+    if (!run) return res.status(404).json({ message: "scan run not found" });
+    let parsedNotes: any = null;
+    try {
+      parsedNotes = run.notes ? JSON.parse(run.notes) : null;
+    } catch {
+      parsedNotes = { raw: run.notes };
+    }
+    const rejectionsRaw: Record<string, number> = (parsedNotes && parsedNotes.rejections) || {};
+    const rejections = Object.entries(rejectionsRaw)
+      .map(([key, count]) => {
+        const [strategy, ...rest] = key.split(":");
+        return { strategy, reason: rest.join(":") || "unknown", count };
+      })
+      .sort((a, b) => b.count - a.count);
+    res.json({ ...run, parsedNotes, rejections });
+  });
+
+  // ─── Learning Infrastructure: backfill summaries for legacy signals ───────
+  app.post("/api/signals/backfill-summaries", async (_req, res) => {
+    try {
+      const all = await storage.getSignals({ limit: 1000 });
+      let count = 0;
+      for (const sig of all) {
+        if (sig.summaryText) continue;
+        const text = summarizeSignal(sig.strategy, sig.direction as "LONG" | "SHORT", sig.reasonJson as Record<string, any>);
+        await storage.updateSignalSummary(sig.id, text);
+        count++;
+      }
+      res.json({ updated: count });
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }

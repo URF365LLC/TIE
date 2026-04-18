@@ -10,6 +10,8 @@ import {
   alertEvents,
   settings,
   tradeAnalyses,
+  strategyParameters,
+  DEFAULT_STRATEGY_PARAMS,
   type Instrument,
   type InsertInstrument,
   type Candle,
@@ -28,6 +30,9 @@ import {
   type InsertSettings,
   type TradeAnalysis,
   type InsertTradeAnalysis,
+  type StrategyParameters,
+  type InsertStrategyParameters,
+  type StrategyParamsConfig,
   type SignalWithInstrument,
 } from "@shared/schema";
 
@@ -62,6 +67,19 @@ export interface IStorage {
   updateSignalStatus(id: number, status: string): Promise<void>;
   markSignalAction(id: number, status: string): Promise<void>;
   resolveSignal(id: number, status: string, outcome: string, outcomePrice: number | null): Promise<void>;
+  updateSignalJournal(id: number, data: { notes?: string | null; confidence?: number | null; tags?: string[] | null }): Promise<Signal | undefined>;
+  updateSignalSummary(id: number, summaryText: string): Promise<void>;
+
+  // Strategy parameters (versioned)
+  getActiveStrategyParameters(): Promise<StrategyParameters>;
+  listStrategyParameters(): Promise<StrategyParameters[]>;
+  createStrategyParameters(data: InsertStrategyParameters): Promise<StrategyParameters>;
+  setActiveStrategyParameters(id: number): Promise<StrategyParameters>;
+  ensureDefaultStrategyParameters(): Promise<StrategyParameters>;
+
+  // Performance analytics aggregates and rejection telemetry
+  getPerformanceAggregates(groupBy: "pair" | "strategy" | "direction" | "asset" | "session" | "hour"): Promise<Array<{ key: string; total: number; wins: number; losses: number; missed: number }>>;
+  getScanRunById(id: number): Promise<ScanRun | undefined>;
   getBacktestStats(): Promise<{ total: number; resolvedTotal: number; wins: number; losses: number; missed: number; unresolved: number; byStrategy: Record<string, { total: number; wins: number; losses: number }>; byDirection: Record<string, { total: number; wins: number; losses: number }>; takenWins: number; takenTotal: number; takenResolved: number }>;
 
   createAlertEvent(data: InsertAlertEvent): Promise<AlertEvent>;
@@ -333,6 +351,158 @@ export class DatabaseStorage implements IStorage {
         resolvedAt: new Date(),
       })
       .where(eq(signals.id, id));
+  }
+
+  async updateSignalJournal(
+    id: number,
+    data: { notes?: string | null; confidence?: number | null; tags?: string[] | null },
+  ): Promise<Signal | undefined> {
+    const patch: Partial<typeof signals.$inferInsert> = {};
+    if (data.notes !== undefined) patch.notes = data.notes;
+    if (data.confidence !== undefined) patch.confidence = data.confidence;
+    if (data.tags !== undefined) patch.tags = data.tags ?? [];
+    if (Object.keys(patch).length === 0) {
+      const [row] = await db.select().from(signals).where(eq(signals.id, id)).limit(1);
+      return row;
+    }
+    const [row] = await db.update(signals).set(patch).where(eq(signals.id, id)).returning();
+    return row;
+  }
+
+  async updateSignalSummary(id: number, summaryText: string): Promise<void> {
+    await db.update(signals).set({ summaryText }).where(eq(signals.id, id));
+  }
+
+  async getActiveStrategyParameters(): Promise<StrategyParameters> {
+    const [active] = await db
+      .select()
+      .from(strategyParameters)
+      .where(eq(strategyParameters.isActive, true))
+      .orderBy(desc(strategyParameters.version))
+      .limit(1);
+    if (active) return active;
+    return this.ensureDefaultStrategyParameters();
+  }
+
+  async listStrategyParameters(): Promise<StrategyParameters[]> {
+    return db.select().from(strategyParameters).orderBy(desc(strategyParameters.version));
+  }
+
+  async createStrategyParameters(data: InsertStrategyParameters): Promise<StrategyParameters> {
+    const [row] = await db.insert(strategyParameters).values(data).returning();
+    return row;
+  }
+
+  async setActiveStrategyParameters(id: number): Promise<StrategyParameters> {
+    return await db.transaction(async (tx) => {
+      await tx.update(strategyParameters).set({ isActive: false });
+      const [row] = await tx
+        .update(strategyParameters)
+        .set({ isActive: true })
+        .where(eq(strategyParameters.id, id))
+        .returning();
+      if (!row) throw new Error(`strategy_parameters id ${id} not found`);
+      return row;
+    });
+  }
+
+  async ensureDefaultStrategyParameters(): Promise<StrategyParameters> {
+    const existing = await db.select().from(strategyParameters).limit(1);
+    if (existing.length > 0) {
+      const active = existing.find((r) => r.isActive);
+      if (active) return active;
+      const [promoted] = await db
+        .update(strategyParameters)
+        .set({ isActive: true })
+        .where(eq(strategyParameters.id, existing[0].id))
+        .returning();
+      return promoted;
+    }
+    const [row] = await db
+      .insert(strategyParameters)
+      .values({
+        version: 1,
+        name: "v1 (initial defaults)",
+        description: "Initial strategy parameter set seeded from hardcoded constants.",
+        isActive: true,
+        params: DEFAULT_STRATEGY_PARAMS as unknown as StrategyParamsConfig,
+      })
+      .returning();
+    return row;
+  }
+
+  async getScanRunById(id: number): Promise<ScanRun | undefined> {
+    const [row] = await db.select().from(scanRuns).where(eq(scanRuns.id, id)).limit(1);
+    return row;
+  }
+
+  // Performance aggregates: per-pair / per-strategy / per-direction / per-asset / per-session / per-hour.
+  // session derived from extract(hour from detected_at) ranges in UTC:
+  //   Asia 0-7, London 7-13, NY-overlap 13-17, NY 17-22, Off 22-24
+  async getPerformanceAggregates(
+    groupBy: "pair" | "strategy" | "direction" | "asset" | "session" | "hour",
+  ): Promise<Array<{ key: string; total: number; wins: number; losses: number; missed: number }>> {
+    const archivedStatuses = ["EXPIRED", "TAKEN", "NOT_TAKEN"];
+    const baseWhere = inArray(signals.status, archivedStatuses);
+
+    let keyExpr: any;
+    switch (groupBy) {
+      case "pair":
+        keyExpr = sql<string>`${instruments.canonicalSymbol}`;
+        break;
+      case "strategy":
+        keyExpr = sql<string>`${signals.strategy}`;
+        break;
+      case "direction":
+        keyExpr = sql<string>`${signals.direction}`;
+        break;
+      case "asset":
+        keyExpr = sql<string>`${instruments.assetClass}`;
+        break;
+      case "session":
+        keyExpr = sql<string>`case
+          when extract(hour from ${signals.detectedAt} at time zone 'UTC') < 7 then 'Asia'
+          when extract(hour from ${signals.detectedAt} at time zone 'UTC') < 13 then 'London'
+          when extract(hour from ${signals.detectedAt} at time zone 'UTC') < 17 then 'NY-Overlap'
+          when extract(hour from ${signals.detectedAt} at time zone 'UTC') < 22 then 'NY'
+          else 'Off'
+        end`;
+        break;
+      case "hour":
+        keyExpr = sql<string>`lpad(extract(hour from ${signals.detectedAt} at time zone 'UTC')::text, 2, '0') || ':00 UTC'`;
+        break;
+    }
+
+    const needsJoin = groupBy === "pair" || groupBy === "asset";
+    const baseQuery = needsJoin
+      ? db
+          .select({
+            key: keyExpr,
+            total: sql<number>`count(*)::int`,
+            wins: sql<number>`count(*) filter (where ${signals.outcome} = 'WIN')::int`,
+            losses: sql<number>`count(*) filter (where ${signals.outcome} = 'LOSS')::int`,
+            missed: sql<number>`count(*) filter (where ${signals.outcome} = 'MISSED')::int`,
+          })
+          .from(signals)
+          .innerJoin(instruments, eq(signals.instrumentId, instruments.id))
+          .where(baseWhere)
+          .groupBy(keyExpr)
+      : db
+          .select({
+            key: keyExpr,
+            total: sql<number>`count(*)::int`,
+            wins: sql<number>`count(*) filter (where ${signals.outcome} = 'WIN')::int`,
+            losses: sql<number>`count(*) filter (where ${signals.outcome} = 'LOSS')::int`,
+            missed: sql<number>`count(*) filter (where ${signals.outcome} = 'MISSED')::int`,
+          })
+          .from(signals)
+          .where(baseWhere)
+          .groupBy(keyExpr);
+
+    const rows = await baseQuery;
+    return rows
+      .map((r) => ({ key: String(r.key ?? ""), total: r.total, wins: r.wins, losses: r.losses, missed: r.missed }))
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   }
 
   async getActiveSignalsOlderThan(maxAgeMs: number): Promise<Signal[]> {

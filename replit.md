@@ -12,22 +12,25 @@ Analysis-only trading intelligence platform that scans markets using Twelve Data
 - **Background Scanner**: In-process setInterval-based scheduler
 
 ## Key Files
-- `shared/schema.ts` - Data models (instruments, candles, indicators, signals, scan_runs, alert_events, settings)
+- `shared/schema.ts` - Data models (instruments, candles, indicators, signals + summaryText/notes/confidence/tags/paramSetVersion, scan_runs, alert_events, settings, strategy_parameters)
 - `server/routes.ts` - API endpoints
 - `server/storage.ts` - Database operations (IStorage interface + DatabaseStorage)
 - `server/twelvedata.ts` - Twelve Data API client with rate limiting
-- `server/strategies.ts` - Trading strategy evaluation (TREND_CONTINUATION, RANGE_BREAKOUT)
-- `server/scanner.ts` - Background scanner loop
+- `server/strategies.ts` - Parameterized strategy evaluation (accepts StrategyParamsConfig)
+- `server/summary.ts` - Server-side narrative generator (1-sentence summary per signal)
+- `server/scanner.ts` - Background scanner loop (loads active params, tags signals with paramSetVersion, generates summaryText)
 - `server/alerter.ts` - Email alert system
 - `server/db.ts` - Database connection pool
+- `client/src/components/signal-journal.tsx` - Shared SignalJournal / SummaryLine / DeepDiveButton components
 
 ## Pages
-- `/` - Dashboard (stats, recent signals, scan runs)
-- `/signals` - Signal table with filters (defaults to Active Only, position sizing in expanded detail)
+- `/` - Dashboard (stats, recent signals, expandable scan runs with rejection telemetry — "Why no signals?")
+- `/signals` - Signal table with filters (defaults to Active Only, position sizing + journal: notes/confidence/tags + Deep Dive button in expanded detail)
 - `/instruments` - Instrument whitelist by asset class
 - `/instruments/:symbol` - Symbol detail with chart + indicators
-- `/backtest` - Backtest statistics and archived signal outcomes (position sizing inline)
-- `/advisor` - AI Technical Advisor (Portfolio Intelligence, Trade Deep Dive with 1m candles + batch, Strategy Masterclass, Strategy Optimizer)
+- `/backtest` - Backtest statistics and archived signal outcomes (rows expandable for journal + Deep Dive)
+- `/performance` - Performance Analytics (6 tabs: pair, strategy, direction, asset, session, hour-of-UTC) with CSV export per tab
+- `/advisor` - AI Technical Advisor (4 tiers); supports `?signalId=X` deep-link auto-loads Trade Deep Dive
 - `/settings` - Scanner, risk management (account balance, risk %), and email configuration
 
 ## API Routes
@@ -52,6 +55,13 @@ Analysis-only trading intelligence platform that scans markets using Twelve Data
 - `GET /api/advisor/trade-analysis/:signalId` - Get stored analysis for a signal
 - `POST /api/advisor/strategy-guide` - AI strategy masterclass (body: { strategy })
 - `POST /api/advisor/strategy-optimizer` - AI strategy optimizer recommendations
+- `PATCH /api/signals/:id/journal` - Update notes/confidence/tags
+- `POST /api/signals/backfill-summaries` - Generate summaryText for legacy signals (max 1000 at a time)
+- `GET /api/strategy-parameters` - List versioned strategy parameter sets
+- `POST /api/strategy-parameters` - Create new parameter set (body: { name, description?, params, activate? })
+- `POST /api/strategy-parameters/:id/activate` - Activate a parameter set
+- `GET /api/analytics/performance?groupBy=pair|strategy|direction|asset|session|hour` - Aggregates
+- `GET /api/scan/runs/:id` - Single scan run with parsed rejection telemetry
 
 ## Environment Variables
 - `DATABASE_URL` - PostgreSQL connection (auto-provided)

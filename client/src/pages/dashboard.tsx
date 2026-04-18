@@ -1,9 +1,10 @@
+import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Activity, Zap, BarChart3, Clock, Play, Pause, TrendingUp, TrendingDown, AlertCircle } from "lucide-react";
+import { Activity, Zap, BarChart3, Clock, Play, Pause, TrendingUp, TrendingDown, AlertCircle, ChevronDown, ChevronUp } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Link } from "wouter";
@@ -219,26 +220,83 @@ export default function Dashboard() {
             ) : (
               <div className="space-y-2">
                 {recentScans.map((scan) => (
-                  <div key={scan.id} className="flex items-center justify-between p-3 rounded-md bg-card border border-card-border" data-testid={`scan-row-${scan.id}`}>
-                    <div>
-                      <span className="text-sm font-medium">{scan.timeframe}</span>
-                      <p className="text-xs text-muted-foreground">
-                        {new Date(scan.startedAt).toLocaleString()}
-                      </p>
-                    </div>
-                    <Badge
-                      variant={scan.status === "completed" ? "default" : scan.status === "running" ? "secondary" : "destructive"}
-                      className="text-[10px]"
-                    >
-                      {scan.status}
-                    </Badge>
-                  </div>
+                  <ScanRow key={scan.id} scan={scan} />
                 ))}
               </div>
             )}
           </CardContent>
         </Card>
       </div>
+    </div>
+  );
+}
+
+function ScanRow({ scan }: { scan: ScanRun }) {
+  const [open, setOpen] = useState(false);
+
+  const { data: detail, isLoading } = useQuery<{
+    rejections: { strategy: string; reason: string; count: number }[];
+    parsedNotes: { processedCount?: number; total?: number; signalCount?: number; failures?: any[] } | null;
+  }>({
+    queryKey: ["/api/scan/runs", scan.id],
+    enabled: open,
+  });
+
+  const meta = detail?.parsedNotes ?? null;
+
+  return (
+    <div className="rounded-md bg-card border border-card-border" data-testid={`scan-row-${scan.id}`}>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between p-3 hover-elevate text-left"
+        data-testid={`scan-toggle-${scan.id}`}
+      >
+        <div>
+          <span className="text-sm font-medium">{scan.timeframe}</span>
+          <p className="text-xs text-muted-foreground">
+            {new Date(scan.startedAt).toLocaleString()}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge
+            variant={scan.status === "completed" ? "default" : scan.status === "running" ? "secondary" : "destructive"}
+            className="text-[10px]"
+          >
+            {scan.status}
+          </Badge>
+          {open ? <ChevronUp className="w-3.5 h-3.5 text-muted-foreground" /> : <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />}
+        </div>
+      </button>
+      {open && (
+        <div className="px-3 pb-3 text-xs space-y-2" data-testid={`scan-detail-${scan.id}`}>
+          <div className="flex items-center gap-3 text-muted-foreground border-t pt-2 flex-wrap">
+            {meta?.processedCount != null && <span>Processed: <span className="text-foreground font-medium">{meta.processedCount}/{meta.total ?? "?"}</span></span>}
+            {meta?.signalCount != null && <span>Signals: <span className="text-foreground font-medium">{meta.signalCount}</span></span>}
+            {scan.creditsUsedEst != null && <span>Credits: <span className="text-foreground font-medium">{scan.creditsUsedEst}</span></span>}
+            {meta?.failures && meta.failures.length > 0 && <span className="text-red-400">Failures: {meta.failures.length}</span>}
+          </div>
+          {isLoading ? (
+            <Skeleton className="h-12 w-full" />
+          ) : detail && detail.rejections.length > 0 ? (
+            <div>
+              <p className="text-[11px] uppercase tracking-wider text-muted-foreground mb-1.5">Why no signals?</p>
+              <div className="space-y-1">
+                {detail.rejections.slice(0, 8).map((r, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2" data-testid={`rejection-${scan.id}-${i}`}>
+                    <span className="text-muted-foreground truncate">
+                      <span className="text-foreground/80">{r.strategy}</span> · {r.reason}
+                    </span>
+                    <span className="font-mono text-foreground">{r.count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="text-muted-foreground italic">No rejection telemetry recorded for this scan.</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

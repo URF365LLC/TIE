@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { Link } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,7 +13,12 @@ import ReactMarkdown from "react-markdown";
 import type { SignalWithInstrument } from "@shared/schema";
 
 export default function AdvisorPage() {
-  const [activeTab, setActiveTab] = useState("portfolio");
+  const initialSignalId = (() => {
+    if (typeof window === "undefined") return null;
+    const id = new URLSearchParams(window.location.search).get("signalId");
+    return id ? parseInt(id) : null;
+  })();
+  const [activeTab, setActiveTab] = useState(initialSignalId ? "trade" : "portfolio");
 
   return (
     <div className="h-full overflow-y-auto">
@@ -52,7 +58,7 @@ export default function AdvisorPage() {
           </TabsContent>
 
           <TabsContent value="trade" className="mt-4">
-            <TradeDeepDiveTab />
+            <TradeDeepDiveTab autoSignalId={initialSignalId} />
           </TabsContent>
 
           <TabsContent value="strategy" className="mt-4">
@@ -154,10 +160,11 @@ function PortfolioTab() {
   );
 }
 
-function TradeDeepDiveTab() {
-  const [selectedSignalId, setSelectedSignalId] = useState<number | null>(null);
+function TradeDeepDiveTab({ autoSignalId }: { autoSignalId?: number | null }) {
+  const [selectedSignalId, setSelectedSignalId] = useState<number | null>(autoSignalId ?? null);
   const [analysis, setAnalysis] = useState<string | null>(null);
-  const [expandedPicker, setExpandedPicker] = useState(true);
+  const [expandedPicker, setExpandedPicker] = useState(!autoSignalId);
+  const [autoTriggered, setAutoTriggered] = useState(false);
 
   const { data: signals, isLoading: signalsLoading } = useQuery<SignalWithInstrument[]>({
     queryKey: ["/api/backtest/signals", { limit: 100 }],
@@ -185,6 +192,18 @@ function TradeDeepDiveTab() {
   });
 
   const unanalyzedSignals = signals?.filter((s) => !analyzedIds.has(s.id)) || [];
+  const selectedSignal = signals?.find((s) => s.id === selectedSignalId);
+
+  useEffect(() => {
+    if (!autoSignalId || autoTriggered || !signals) return;
+    setAutoTriggered(true);
+    if (analyzedIds.has(autoSignalId)) {
+      handleViewStored(autoSignalId);
+    } else {
+      handleAnalyze(autoSignalId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSignalId, signals, analyzedIds]);
 
   const batchMutation = useMutation({
     mutationFn: async (signalIds: number[]) => {
@@ -369,10 +388,19 @@ function TradeDeepDiveTab() {
       {analysis && !isPending && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base font-medium flex items-center gap-2">
-              <Brain className="w-4 h-4 text-violet-500" />
-              Deep Trade Analysis
-            </CardTitle>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <CardTitle className="text-base font-medium flex items-center gap-2">
+                <Brain className="w-4 h-4 text-violet-500" />
+                Deep Trade Analysis
+              </CardTitle>
+              {selectedSignal && (
+                <Link href={`/instruments/${selectedSignal.instrument.canonicalSymbol}`}>
+                  <Button variant="outline" size="sm" data-testid="button-view-on-chart">
+                    <TrendingUp className="w-3.5 h-3.5 mr-1.5" /> View {selectedSignal.instrument.canonicalSymbol} on Chart
+                  </Button>
+                </Link>
+              )}
+            </div>
           </CardHeader>
           <CardContent>
             <div className="prose prose-sm dark:prose-invert max-w-none" data-testid="text-trade-analysis">

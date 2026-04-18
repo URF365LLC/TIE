@@ -5,9 +5,10 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { TrendingUp, TrendingDown, Trophy, XCircle, HelpCircle, Filter, X, BarChart3, Target, Percent, Scale } from "lucide-react";
+import { TrendingUp, TrendingDown, Trophy, XCircle, HelpCircle, Filter, X, BarChart3, Target, Percent, Scale, ChevronDown, ChevronUp } from "lucide-react";
 import { Link } from "wouter";
 import type { SignalWithInstrument, Settings } from "@shared/schema";
+import { SignalJournal, SummaryLine, DeepDiveButton } from "@/components/signal-journal";
 
 interface BacktestStats {
   total: number;
@@ -27,6 +28,7 @@ export default function BacktestPage() {
   const [strategyFilter, setStrategyFilter] = useState<string>("all");
   const [directionFilter, setDirectionFilter] = useState<string>("all");
   const [outcomeFilter, setOutcomeFilter] = useState<string>("all");
+  const [expandedId, setExpandedId] = useState<number | null>(null);
 
   const queryParams = new URLSearchParams();
   if (strategyFilter !== "all") queryParams.set("strategy", strategyFilter);
@@ -216,45 +218,70 @@ export default function BacktestPage() {
               {signals.map((sig) => {
                 const reason = (sig.reasonJson ?? {}) as Record<string, any>;
                 const hasLevels = reason.entryPrice != null;
+                const isExpanded = expandedId === sig.id;
                 return (
-                  <div key={sig.id} className="flex items-center justify-between p-4 gap-3" data-testid={`backtest-row-${sig.id}`}>
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className={`flex items-center justify-center w-9 h-9 rounded-md shrink-0 ${sig.direction === "LONG" ? "bg-emerald-500/10 text-emerald-500 dark:bg-emerald-500/20" : "bg-red-500/10 text-red-500 dark:bg-red-500/20"}`}>
-                        {sig.direction === "LONG" ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                  <div key={sig.id} data-testid={`backtest-row-${sig.id}`}>
+                    <div
+                      className="flex items-center justify-between p-4 gap-3 cursor-pointer hover-elevate"
+                      onClick={() => setExpandedId(isExpanded ? null : sig.id)}
+                      data-testid={`backtest-toggle-${sig.id}`}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={`flex items-center justify-center w-9 h-9 rounded-md shrink-0 ${sig.direction === "LONG" ? "bg-emerald-500/10 text-emerald-500 dark:bg-emerald-500/20" : "bg-red-500/10 text-red-500 dark:bg-red-500/20"}`}>
+                          {sig.direction === "LONG" ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <Link href={`/instruments/${sig.instrument.canonicalSymbol}`}>
+                              <span className="text-sm font-semibold hover:underline" onClick={(e) => e.stopPropagation()}>{sig.instrument.canonicalSymbol}</span>
+                            </Link>
+                            <Badge variant="secondary" className="text-[10px]">{sig.strategy.replace(/_/g, " ")}</Badge>
+                            <Badge
+                              variant="outline"
+                              className={`text-[10px] ${sig.status === "TAKEN" ? "border-emerald-500/50 text-emerald-500" : sig.status === "NOT_TAKEN" ? "border-muted-foreground/50" : ""}`}
+                            >
+                              {sig.status.replace(/_/g, " ")}
+                            </Badge>
+                          </div>
+                          <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground flex-wrap">
+                            <span>{sig.timeframe}</span>
+                            <span>{new Date(sig.detectedAt).toLocaleString()}</span>
+                            {hasLevels && (
+                              <span className="hidden sm:inline">
+                                Entry {formatPrice(reason.entryPrice)} · <span className="text-red-400">SL {formatPrice(reason.stopLoss)}</span> · <span className="text-emerald-400">TP {formatPrice(reason.takeProfit)}</span>
+                                {settings && reason.stopDistance > 0 && (() => {
+                                  const ps = calcPositionSize(settings.accountBalance, settings.riskPercent, reason.stopDistance, reason.entryPrice, sig.instrument.assetClass);
+                                  const display = sig.instrument.assetClass === "FOREX" ? ps.units.toFixed(2) + " lots" : (ps.units < 1 ? ps.units.toFixed(6) : ps.units.toFixed(2)) + " units";
+                                  return <> · <Scale className="w-3 h-3 inline" /> {display}</>;
+                                })()}
+                              </span>
+                            )}
+                          </div>
+                          <SummaryLine text={sig.summaryText} />
+                        </div>
                       </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <Link href={`/instruments/${sig.instrument.canonicalSymbol}`}>
-                            <span className="text-sm font-semibold hover:underline">{sig.instrument.canonicalSymbol}</span>
-                          </Link>
-                          <Badge variant="secondary" className="text-[10px]">{sig.strategy.replace(/_/g, " ")}</Badge>
-                          <Badge
-                            variant="outline"
-                            className={`text-[10px] ${sig.status === "TAKEN" ? "border-emerald-500/50 text-emerald-500" : sig.status === "NOT_TAKEN" ? "border-muted-foreground/50" : ""}`}
-                          >
-                            {sig.status.replace(/_/g, " ")}
-                          </Badge>
-                        </div>
-                        <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground flex-wrap">
-                          <span>{sig.timeframe}</span>
-                          <span>{new Date(sig.detectedAt).toLocaleString()}</span>
-                          {hasLevels && (
-                            <span className="hidden sm:inline">
-                              Entry {formatPrice(reason.entryPrice)} · <span className="text-red-400">SL {formatPrice(reason.stopLoss)}</span> · <span className="text-emerald-400">TP {formatPrice(reason.takeProfit)}</span>
-                              {settings && reason.stopDistance > 0 && (() => {
-                                const ps = calcPositionSize(settings.accountBalance, settings.riskPercent, reason.stopDistance, reason.entryPrice, sig.instrument.assetClass);
-                                const display = sig.instrument.assetClass === "FOREX" ? ps.units.toFixed(2) + " lots" : (ps.units < 1 ? ps.units.toFixed(6) : ps.units.toFixed(2)) + " units";
-                                return <> · <Scale className="w-3 h-3 inline" /> {display}</>;
-                              })()}
-                            </span>
-                          )}
-                        </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <ScoreBadge score={sig.score} />
+                        <OutcomeBadge outcome={sig.outcome ?? "PENDING"} />
+                        {isExpanded ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
                       </div>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <ScoreBadge score={sig.score} />
-                      <OutcomeBadge outcome={sig.outcome ?? "PENDING"} />
-                    </div>
+
+                    {isExpanded && (
+                      <div className="px-4 pb-4" data-testid={`backtest-detail-${sig.id}`}>
+                        <div className="rounded-md border p-4 bg-muted/30 space-y-3">
+                          <div className="flex items-center justify-end">
+                            <DeepDiveButton signalId={sig.id} />
+                          </div>
+                          <SignalJournal
+                            signalId={sig.id}
+                            initialNotes={sig.notes}
+                            initialConfidence={sig.confidence}
+                            initialTags={sig.tags}
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}

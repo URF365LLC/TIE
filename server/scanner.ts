@@ -6,7 +6,8 @@ import { fetchAllIndicatorsForSymbolMulti, getRateLimitState } from "./twelvedat
 import { evaluateStrategies, hasRequiredIndicators, type StrategyRejection } from "./strategies";
 import { sendSignalAlert } from "./alerter";
 import { log } from "./logger";
-import type { Instrument, InsertCandle, InsertIndicator, Candle, Indicator, Signal } from "@shared/schema";
+import { summarizeSignal } from "./summary";
+import type { Instrument, InsertCandle, InsertIndicator, Candle, Indicator, Signal, StrategyParamsConfig } from "@shared/schema";
 
 let scannerTimeout: NodeJS.Timeout | null = null;
 let isScanning = false;
@@ -136,6 +137,8 @@ export async function runScanCycle(timeframe: string, maxPerBurst: number = 4, b
   log(`Scan started: ${timeframe} (run #${scanRun.id})`, "scanner");
 
   try {
+    const activeParams = await storage.getActiveStrategyParameters();
+    const paramsConfig = activeParams.params as unknown as StrategyParamsConfig;
     const instruments = await storage.getEnabledInstruments();
     let processedCount = 0;
     let signalCount = 0;
@@ -146,7 +149,7 @@ export async function runScanCycle(timeframe: string, maxPerBurst: number = 4, b
     for (let i = 0; i < instruments.length; i += maxPerBurst) {
       const burst = instruments.slice(i, i + maxPerBurst);
 
-      const results = await Promise.allSettled(burst.map((inst) => processInstrument(inst)));
+      const results = await Promise.allSettled(burst.map((inst) => processInstrument(inst, paramsConfig, activeParams.version)));
       results.forEach((res, idx) => {
         const inst = burst[idx];
         if (res.status === "fulfilled") {
@@ -183,6 +186,8 @@ export async function runScanCycle(timeframe: string, maxPerBurst: number = 4, b
         rejections: rejectionTotals,
         failures,
         retryCount: rl.retryCount,
+        paramSetVersion: activeParams.version,
+        paramSetName: activeParams.name,
       }),
     });
 
@@ -277,7 +282,7 @@ interface ProcessResult {
   rejections: StrategyRejection[];
 }
 
-async function processInstrument(inst: Instrument): Promise<ProcessResult> {
+async function processInstrument(inst: Instrument, paramsConfig: StrategyParamsConfig, paramSetVersion: number): Promise<ProcessResult> {
   // Freshness gate: if scan_progress already covers the latest expected closed 15m bar, skip the API entirely.
   const expectedEntryBoundary = expectedLatestClosedBoundary("15m");
   const progress = await storage.getScanProgress(inst.id, "15m");
@@ -329,6 +334,7 @@ async function processInstrument(inst: Instrument): Promise<ProcessResult> {
     biasCandles: biasForEval,
     biasIndicators,
     entryTimeframe: "15m",
+    params: paramsConfig,
   });
 
   let signalCount = 0;
@@ -338,6 +344,7 @@ async function processInstrument(inst: Instrument): Promise<ProcessResult> {
       continue;
     }
 
+    const summaryText = summarizeSignal(result.strategy, result.direction, result.reasonJson);
     const signal = await storage.upsertSignal({
       instrumentId: inst.id,
       timeframe: "15m",
@@ -347,6 +354,8 @@ async function processInstrument(inst: Instrument): Promise<ProcessResult> {
       score: result.score,
       reasonJson: result.reasonJson,
       status: "NEW",
+      paramSetVersion,
+      summaryText,
     });
 
     signalCount++;

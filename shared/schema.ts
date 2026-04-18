@@ -123,6 +123,11 @@ export const signals = pgTable(
     outcome: varchar("outcome", { length: 10 }),
     outcomePrice: priceNumeric("outcome_price"),
     resolvedAt: timestamp("resolved_at", tz),
+    paramSetVersion: integer("param_set_version"),
+    summaryText: text("summary_text"),
+    notes: text("notes"),
+    confidence: integer("confidence"),
+    tags: text("tags").array().notNull().default(sql`'{}'::text[]`),
   },
   (table) => [
     uniqueIndex("signals_unique_idx").on(
@@ -172,6 +177,16 @@ export const settings = pgTable("settings", {
   tdMaxConcurrency: integer("td_max_concurrency").notNull().default(3),
 });
 
+export const strategyParameters = pgTable("strategy_parameters", {
+  id: serial("id").primaryKey(),
+  version: integer("version").notNull().unique(),
+  name: varchar("name", { length: 100 }).notNull(),
+  description: text("description"),
+  isActive: boolean("is_active").notNull().default(false),
+  params: jsonb("params").notNull(),
+  createdAt: timestamp("created_at", tz).notNull().defaultNow(),
+});
+
 export const tradeAnalyses = pgTable("trade_analyses", {
   id: serial("id").primaryKey(),
   signalId: integer("signal_id").notNull().references(() => signals.id, { onDelete: "cascade" }).unique(),
@@ -194,6 +209,7 @@ export const insertScanProgressSchema = createInsertSchema(scanProgress).omit({ 
 export const insertSignalSchema = createInsertSchema(signals).omit({ id: true });
 export const insertAlertEventSchema = createInsertSchema(alertEvents).omit({ id: true });
 export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });
+export const insertStrategyParametersSchema = createInsertSchema(strategyParameters).omit({ id: true, createdAt: true });
 export const insertTradeAnalysisSchema = createInsertSchema(tradeAnalyses).omit({ id: true, analyzedAt: true });
 
 export type Instrument = typeof instruments.$inferSelect;
@@ -212,8 +228,44 @@ export type AlertEvent = typeof alertEvents.$inferSelect;
 export type InsertAlertEvent = z.infer<typeof insertAlertEventSchema>;
 export type Settings = typeof settings.$inferSelect;
 export type InsertSettings = z.infer<typeof insertSettingsSchema>;
+export type StrategyParameters = typeof strategyParameters.$inferSelect;
+export type InsertStrategyParameters = z.infer<typeof insertStrategyParametersSchema>;
 export type TradeAnalysis = typeof tradeAnalyses.$inferSelect;
 export type InsertTradeAnalysis = z.infer<typeof insertTradeAnalysisSchema>;
+
+export interface StrategyParamsConfig {
+  trendContinuation: {
+    adxThreshold: number;
+    atrStopMultiplier: number;
+    riskRewardRatio: number;
+    scoreThreshold: number;
+    pullbackTolerance: number;
+  };
+  rangeBreakout: {
+    adxCeiling: number;
+    bbWidthPercentile: number;
+    rangeLookbackBars: number;
+    atrStopMultiplier: number;
+    riskRewardRatio: number;
+  };
+}
+
+export const DEFAULT_STRATEGY_PARAMS: StrategyParamsConfig = {
+  trendContinuation: {
+    adxThreshold: 18,
+    atrStopMultiplier: 1.2,
+    riskRewardRatio: 2,
+    scoreThreshold: 40,
+    pullbackTolerance: 0.002,
+  },
+  rangeBreakout: {
+    adxCeiling: 18,
+    bbWidthPercentile: 50,
+    rangeLookbackBars: 20,
+    atrStopMultiplier: 1.2,
+    riskRewardRatio: 2,
+  },
+};
 
 export const WHITELIST = {
   FOREX: [

@@ -10,6 +10,7 @@ import { TrendingUp, TrendingDown, Zap, Filter, X, ChevronDown, ChevronUp, Targe
 import { Link } from "wouter";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { SignalWithInstrument, Settings } from "@shared/schema";
+import { SignalJournal, SummaryLine, DeepDiveButton } from "@/components/signal-journal";
 
 const MONITORING_THRESHOLD_MS = 60 * 60 * 1000;
 
@@ -254,6 +255,7 @@ function SignalList({ signals, expandedId, setExpandedId, actionMutation, settin
                       </span>
                     )}
                   </div>
+                  <SummaryLine text={sig.summaryText} />
                 </div>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -351,29 +353,41 @@ function SignalList({ signals, expandedId, setExpandedId, actionMutation, settin
                     </div>
                   </div>
 
-                  {sig.status === "NEW" && (
-                    <div className="flex items-center gap-2 pt-2 border-t">
-                      <span className="text-xs text-muted-foreground mr-auto">Mark this signal:</span>
-                      <Button
-                        size="sm"
-                        variant="default"
-                        disabled={actionMutation.isPending}
-                        onClick={(e) => { e.stopPropagation(); actionMutation.mutate({ id: sig.id, action: "TAKEN" }); }}
-                        data-testid={`button-taken-${sig.id}`}
-                      >
-                        <Check className="w-3 h-3 mr-1" /> Taken
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={actionMutation.isPending}
-                        onClick={(e) => { e.stopPropagation(); actionMutation.mutate({ id: sig.id, action: "NOT_TAKEN" }); }}
-                        data-testid={`button-not-taken-${sig.id}`}
-                      >
-                        <XCircle className="w-3 h-3 mr-1" /> Not Taken
-                      </Button>
-                    </div>
-                  )}
+                  <div className="flex items-center gap-2 pt-2 border-t flex-wrap">
+                    {sig.status === "NEW" ? (
+                      <>
+                        <span className="text-xs text-muted-foreground mr-auto">Mark this signal:</span>
+                        <Button
+                          size="sm"
+                          variant="default"
+                          disabled={actionMutation.isPending}
+                          onClick={(e) => { e.stopPropagation(); actionMutation.mutate({ id: sig.id, action: "TAKEN" }); }}
+                          data-testid={`button-taken-${sig.id}`}
+                        >
+                          <Check className="w-3 h-3 mr-1" /> Taken
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={actionMutation.isPending}
+                          onClick={(e) => { e.stopPropagation(); actionMutation.mutate({ id: sig.id, action: "NOT_TAKEN" }); }}
+                          data-testid={`button-not-taken-${sig.id}`}
+                        >
+                          <XCircle className="w-3 h-3 mr-1" /> Not Taken
+                        </Button>
+                      </>
+                    ) : (
+                      <span className="text-xs text-muted-foreground mr-auto">Actions:</span>
+                    )}
+                    <DeepDiveButton signalId={sig.id} />
+                  </div>
+
+                  <SignalJournal
+                    signalId={sig.id}
+                    initialNotes={sig.notes}
+                    initialConfidence={sig.confidence}
+                    initialTags={sig.tags}
+                  />
 
                   {sig.outcome && (
                     <div className="flex items-center gap-2 pt-2 border-t">

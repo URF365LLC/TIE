@@ -83,6 +83,13 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+      // Seed the v1 strategy parameter set if none exists (Learning Infrastructure).
+      import("./storage").then(({ storage }) =>
+        storage
+          .ensureDefaultStrategyParameters()
+          .then((sp) => log(`Active strategy params: v${sp.version} ${sp.name}`, "boot"))
+          .catch((err) => log(`Failed to seed strategy parameters: ${err.message}`, "boot")),
+      );
       startScanner().catch((err) => log(`scanner start failed: ${err.message}`, "scanner"));
     },
   );
