@@ -22,7 +22,16 @@ const settingsUpdateSchema = z.object({
   tdCreditLimitPerMin: z.number().int().min(8).max(5000).optional(),
   tdCreditTargetPerMin: z.number().int().min(8).max(5000).optional(),
   tdMaxConcurrency: z.number().int().min(1).max(16).optional(),
-});
+}).refine(
+  (data) =>
+    data.tdCreditTargetPerMin == null ||
+    data.tdCreditLimitPerMin == null ||
+    data.tdCreditTargetPerMin <= data.tdCreditLimitPerMin,
+  {
+    message: "tdCreditTargetPerMin must be less than or equal to tdCreditLimitPerMin",
+    path: ["tdCreditTargetPerMin"],
+  },
+);
 
 export async function registerRoutes(
   httpServer: Server,

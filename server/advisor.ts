@@ -12,11 +12,12 @@ const openai = new OpenAI({
 const ADVISOR_MODEL = process.env.ADVISOR_MODEL || "gpt-5.1";
 const ADVISOR_FALLBACK_MODEL = process.env.ADVISOR_FALLBACK_MODEL || "gpt-4o";
 
-type ChatParams = Parameters<typeof openai.chat.completions.create>[0];
+type ChatParamsBase = Parameters<typeof openai.chat.completions.create>[0];
+type ChatParamsNoModel = Omit<ChatParamsBase, "model" | "stream"> & { stream?: false };
 
-async function createChatCompletion(params: ChatParams) {
+async function createChatCompletion(params: ChatParamsNoModel): Promise<OpenAI.Chat.Completions.ChatCompletion> {
   try {
-    return await openai.chat.completions.create({ ...params, model: ADVISOR_MODEL });
+    return await openai.chat.completions.create({ ...params, model: ADVISOR_MODEL, stream: false });
   } catch (err: any) {
     const msg = (err?.message ?? "").toLowerCase();
     const code = err?.code ?? err?.error?.code;
@@ -24,10 +25,10 @@ async function createChatCompletion(params: ChatParams) {
       err?.status === 404 ||
       code === "model_not_found" ||
       code === "invalid_model" ||
-      msg.includes("model") && (msg.includes("not found") || msg.includes("does not exist") || msg.includes("invalid"));
+      (msg.includes("model") && (msg.includes("not found") || msg.includes("does not exist") || msg.includes("invalid")));
     if (isModelError && ADVISOR_FALLBACK_MODEL && ADVISOR_FALLBACK_MODEL !== ADVISOR_MODEL) {
       log(`Advisor model "${ADVISOR_MODEL}" unavailable, falling back to "${ADVISOR_FALLBACK_MODEL}"`, "advisor");
-      return await openai.chat.completions.create({ ...params, model: ADVISOR_FALLBACK_MODEL });
+      return await openai.chat.completions.create({ ...params, model: ADVISOR_FALLBACK_MODEL, stream: false });
     }
     throw err;
   }
