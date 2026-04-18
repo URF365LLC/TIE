@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Download, BarChart3, Layers, ArrowUpDown, Globe, Clock, Calendar, ArrowUp, ArrowDown } from "lucide-react";
+import { Download, BarChart3, Layers, ArrowUpDown, Globe, Clock, Calendar, ArrowUp, ArrowDown, type LucideIcon } from "lucide-react";
 
 type GroupBy = "pair" | "strategy" | "direction" | "asset" | "session" | "hour";
 
@@ -16,7 +16,7 @@ interface AggregateRow {
   missed: number;
 }
 
-const TABS: { value: GroupBy; label: string; icon: any }[] = [
+const TABS: { value: GroupBy; label: string; icon: LucideIcon }[] = [
   { value: "pair", label: "By Pair", icon: BarChart3 },
   { value: "strategy", label: "By Strategy", icon: Layers },
   { value: "direction", label: "By Direction", icon: ArrowUpDown },

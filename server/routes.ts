@@ -369,13 +369,14 @@ export async function registerRoutes(
     if (Number.isNaN(id)) return res.status(400).json({ message: "invalid id" });
     const run = await storage.getScanRunById(id);
     if (!run) return res.status(404).json({ message: "scan run not found" });
-    let parsedNotes: any = null;
+    type ParsedNotes = { rejections?: Record<string, number>; raw?: string | null } & Record<string, unknown>;
+    let parsedNotes: ParsedNotes | null = null;
     try {
-      parsedNotes = run.notes ? JSON.parse(run.notes) : null;
+      parsedNotes = run.notes ? (JSON.parse(run.notes) as ParsedNotes) : null;
     } catch {
       parsedNotes = { raw: run.notes };
     }
-    const rejectionsRaw: Record<string, number> = (parsedNotes && parsedNotes.rejections) || {};
+    const rejectionsRaw: Record<string, number> = parsedNotes?.rejections ?? {};
     const rejections = Object.entries(rejectionsRaw)
       .map(([key, count]) => {
         const [strategy, ...rest] = key.split(":");

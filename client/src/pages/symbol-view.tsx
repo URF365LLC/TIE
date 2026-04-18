@@ -7,7 +7,7 @@ import { TrendingUp, TrendingDown, ArrowLeft, CandlestickChart, Activity } from 
 import { Button } from "@/components/ui/button";
 import { Link } from "wouter";
 import type { Candle, Indicator, SignalWithInstrument, Instrument } from "@shared/schema";
-import { DeepDiveButton } from "@/components/signal-journal";
+import { DeepDiveButton, SummaryLine } from "@/components/signal-journal";
 import { useRef, useEffect, useMemo } from "react";
 
 export default function SymbolView() {
@@ -108,23 +108,26 @@ export default function SymbolView() {
             ) : (
               <div className="space-y-2">
                 {signals.slice(0, 10).map((sig) => (
-                  <div key={sig.id} className="flex items-center justify-between p-3 rounded-md border border-card-border" data-testid={`signal-detail-${sig.id}`}>
-                    <div className="flex items-center gap-2">
-                      {sig.direction === "LONG" ? (
-                        <TrendingUp className="w-4 h-4 text-emerald-500" />
-                      ) : (
-                        <TrendingDown className="w-4 h-4 text-red-500" />
-                      )}
-                      <div>
-                        <span className="text-sm font-medium">{sig.direction}</span>
-                        <p className="text-xs text-muted-foreground">{sig.strategy.replace("_", " ")}</p>
+                  <div key={sig.id} className="flex flex-col gap-1 p-3 rounded-md border border-card-border" data-testid={`signal-detail-${sig.id}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        {sig.direction === "LONG" ? (
+                          <TrendingUp className="w-4 h-4 text-emerald-500" />
+                        ) : (
+                          <TrendingDown className="w-4 h-4 text-red-500" />
+                        )}
+                        <div>
+                          <span className="text-sm font-medium">{sig.direction}</span>
+                          <p className="text-xs text-muted-foreground">{sig.strategy.replace("_", " ")}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <ScoreBadge score={sig.score} />
+                        <Badge variant="secondary" className="text-[10px]">{sig.status}</Badge>
+                        <DeepDiveButton signalId={sig.id} size="sm" variant="ghost" />
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <ScoreBadge score={sig.score} />
-                      <Badge variant="secondary" className="text-[10px]">{sig.status}</Badge>
-                      <DeepDiveButton signalId={sig.id} size="sm" variant="ghost" />
-                    </div>
+                    <SummaryLine text={sig.summaryText} />
                   </div>
                 ))}
               </div>

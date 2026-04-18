@@ -9,7 +9,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Link } from "wouter";
 import type { SignalWithInstrument, ScanRun } from "@shared/schema";
-import { DeepDiveButton } from "@/components/signal-journal";
+import { DeepDiveButton, SummaryLine } from "@/components/signal-journal";
 
 export default function Dashboard() {
   const { toast } = useToast();
@@ -186,6 +186,7 @@ export default function Dashboard() {
                               </span>
                             )}
                           </div>
+                          <SummaryLine text={sig.summaryText} />
                         </div>
                       </Link>
                       <div className="flex items-center gap-2 shrink-0">

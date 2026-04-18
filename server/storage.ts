@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { eq, and, desc, sql, lt, inArray, or, isNull } from "drizzle-orm";
+import { eq, and, desc, sql, lt, inArray, or, isNull, type SQL } from "drizzle-orm";
 import {
   instruments,
   candles,
@@ -451,7 +451,7 @@ export class DatabaseStorage implements IStorage {
     const archivedStatuses = ["EXPIRED", "TAKEN", "NOT_TAKEN"];
     const baseWhere = inArray(signals.status, archivedStatuses);
 
-    let keyExpr: any;
+    let keyExpr: SQL<string>;
     switch (groupBy) {
       case "pair":
         keyExpr = sql<string>`${instruments.canonicalSymbol}`;
