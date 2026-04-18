@@ -7,6 +7,9 @@ interface StrategyInput {
   entryIndicators: Indicator[];
   biasCandles: Candle[];
   biasIndicators: Indicator[];
+  /** Optional higher-timeframe (4h) candles+indicators for confluence gating. */
+  htfCandles?: Candle[];
+  htfIndicators?: Indicator[];
   entryTimeframe: string;
   params?: StrategyParamsConfig;
 }
@@ -110,10 +113,57 @@ function evaluateTrendContinuation(
   }
 
   const direction: "LONG" | "SHORT" = longBias ? "LONG" : "SHORT";
+
+  // Higher-timeframe (4h) confluence gate. Only applied when explicitly enabled in the
+  // parameter set, the strategy is opted in, AND we actually have htf data.
+  const conf = input.params?.confluence;
+  const confAppliesHere = !conf?.appliesTo || conf.appliesTo.includes("TREND_CONTINUATION");
+  if (confAppliesHere && conf?.requireHtfAlignment && input.htfCandles?.length && input.htfIndicators?.length) {
+    const htfBars = Math.max(2, conf.htfEma200SlopeBars);
+    if (input.htfIndicators.length >= htfBars + 1) {
+      const htfNow = input.htfIndicators[0];
+      const htfPast = input.htfIndicators[htfBars];
+      const htfClose = input.htfCandles[0]?.close;
+      if (htfNow?.ema200 != null && htfPast?.ema200 != null && htfClose != null) {
+        const htfUp = htfNow.ema200 > htfPast.ema200 && htfClose > htfNow.ema200;
+        const htfDown = htfNow.ema200 < htfPast.ema200 && htfClose < htfNow.ema200;
+        const aligned = (direction === "LONG" && htfUp) || (direction === "SHORT" && htfDown);
+        if (!aligned) {
+          return reject(STRAT, "htf_confluence_conflict", {
+            direction,
+            htfClose,
+            htfEma200: htfNow.ema200,
+            htfSlope: htfUp ? "up" : htfDown ? "down" : "flat",
+          });
+        }
+      }
+    }
+  }
+
+  // Key-level confluence: entry close must be within proximityPct of prior-24h high (LONG)
+  // or low (SHORT) computed from 1h bias candles. Cheap, no extra data fetch needed.
+  if (confAppliesHere && conf?.requireKeyLevels && input.biasCandles?.length >= 24) {
+    const last24 = input.biasCandles.slice(0, 24); // bias is DESC: latest first
+    const priorHigh = Math.max(...last24.map((c) => c.high));
+    const priorLow = Math.min(...last24.map((c) => c.low));
+    const close = latestClosed.close;
+    const prox = conf.keyLevelProximityPct ?? 0.5;
+    const distPct = direction === "LONG"
+      ? Math.abs((priorHigh - close) / close) * 100
+      : Math.abs((close - priorLow) / close) * 100;
+    if (distPct > prox) {
+      return reject(STRAT, "key_level_too_far", { direction, close, priorHigh, priorLow, distPct, proximityPct: prox });
+    }
+  }
+
   const reasons: Record<string, any> = {
     bias: direction === "LONG" ? "close > EMA200, slope up" : "close < EMA200, slope down",
   };
   let score = 20;
+  if (conf?.requireHtfAlignment && input.htfIndicators?.length) {
+    reasons.htfConfluence = `4h aligned ${direction}`;
+    score += 5;
+  }
 
   const emaStack =
     direction === "LONG"
@@ -247,6 +297,41 @@ function evaluateRangeBreakout(
       rangeHigh,
       rangeLow,
     });
+  }
+
+  // Confluence gates (mirror evaluateTrendContinuation): per-strategy opt-in via appliesTo.
+  const conf = input.params?.confluence;
+  const confAppliesHere = !conf?.appliesTo || conf.appliesTo.includes("RANGE_BREAKOUT");
+  if (confAppliesHere && conf?.requireHtfAlignment && input.htfCandles?.length && input.htfIndicators?.length) {
+    const htfBars = Math.max(2, conf.htfEma200SlopeBars);
+    if (input.htfIndicators.length >= htfBars + 1) {
+      const htfNow = input.htfIndicators[0];
+      const htfPast = input.htfIndicators[htfBars];
+      const htfClose = input.htfCandles[0]?.close;
+      if (htfNow?.ema200 != null && htfPast?.ema200 != null && htfClose != null) {
+        const htfUp = htfNow.ema200 > htfPast.ema200 && htfClose > htfNow.ema200;
+        const htfDown = htfNow.ema200 < htfPast.ema200 && htfClose < htfNow.ema200;
+        const aligned = (direction === "LONG" && htfUp) || (direction === "SHORT" && htfDown);
+        if (!aligned) {
+          return reject(STRAT, "htf_confluence_conflict", { direction, htfClose, htfEma200: htfNow.ema200 });
+        }
+        reasons.htfConfluence = `4h aligned ${direction}`;
+      }
+    }
+  }
+  if (confAppliesHere && conf?.requireKeyLevels && input.biasCandles?.length >= 24) {
+    const last24 = input.biasCandles.slice(0, 24);
+    const priorHigh = Math.max(...last24.map((c) => c.high));
+    const priorLow = Math.min(...last24.map((c) => c.low));
+    const close = latestClosed.close;
+    const prox = conf.keyLevelProximityPct ?? 0.5;
+    const distPct = direction === "LONG"
+      ? Math.abs((priorHigh - close) / close) * 100
+      : Math.abs((close - priorLow) / close) * 100;
+    if (distPct > prox) {
+      return reject(STRAT, "key_level_too_far", { direction, close, priorHigh, priorLow, distPct, proximityPct: prox });
+    }
+    reasons.keyLevel = direction === "LONG" ? `near priorHigh ${priorHigh}` : `near priorLow ${priorLow}`;
   }
 
   const entryPrice = latestClosed.close;

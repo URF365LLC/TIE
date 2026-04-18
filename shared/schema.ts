@@ -124,18 +124,24 @@ export const signals = pgTable(
     outcomePrice: priceNumeric("outcome_price"),
     resolvedAt: timestamp("resolved_at", tz),
     paramSetVersion: integer("param_set_version"),
+    paramSetId: integer("param_set_id"),
+    mode: varchar("mode", { length: 10 }).notNull().default("live"),
     summaryText: text("summary_text"),
     notes: text("notes"),
     confidence: integer("confidence"),
     tags: text("tags").array().notNull().default(sql`'{}'::text[]`),
   },
   (table) => [
+    // Unique per (instrument, tf, strategy, direction, candle, mode, paramSetId) so that the same
+    // bar can produce one live + several shadow signals (one per candidate set) without colliding.
     uniqueIndex("signals_unique_idx").on(
       table.instrumentId,
       table.timeframe,
       table.strategy,
       table.direction,
-      table.candleDatetimeUtc
+      table.candleDatetimeUtc,
+      table.mode,
+      table.paramSetId,
     ),
     index("signals_status_idx").on(table.status),
     index("signals_detected_at_idx").on(table.detectedAt),
@@ -192,15 +198,52 @@ export interface StrategyParamsConfig {
     atrStopMultiplier: number;
     riskRewardRatio: number;
   };
+  confluence?: {
+    /** 4h trend (EMA200 slope + price-side) gate. */
+    requireHtfAlignment: boolean;
+    htfTimeframe: "4h";
+    htfEma200SlopeBars: number;
+    /** Optional key-level gate: entry must be within proximityPct of prior-24h high/low (computed from 1h bias candles). */
+    requireKeyLevels?: boolean;
+    keyLevelProximityPct?: number;
+    /** Per-strategy opt-in. Empty/undefined = applies to all supported strategies. */
+    appliesTo?: Array<"TREND_CONTINUATION" | "RANGE_BREAKOUT">;
+  };
 }
 
+// Status values for strategy parameter sets:
+//  - draft: created (e.g. by optimizer) but not yet running anywhere
+//  - active: drives live scanning. Exactly one row should have this status.
+//  - shadow: evaluated alongside active on every tick; signals tagged mode='shadow' and never alerted
+//  - archived: previously active or shadow, now retained only for history
 export const strategyParameters = pgTable("strategy_parameters", {
   id: serial("id").primaryKey(),
   version: integer("version").notNull().unique(),
   name: varchar("name", { length: 100 }).notNull(),
   description: text("description"),
+  // Legacy column kept so older rows continue to work; new code reads `status`.
   isActive: boolean("is_active").notNull().default(false),
+  status: varchar("status", { length: 20 }).notNull().default("draft"),
+  rationale: jsonb("rationale"),
+  parentId: integer("parent_id"),
+  activatedAt: timestamp("activated_at", tz),
+  archivedAt: timestamp("archived_at", tz),
   params: jsonb("params").$type<StrategyParamsConfig>().notNull(),
+  createdAt: timestamp("created_at", tz).notNull().defaultNow(),
+});
+
+export const replayRuns = pgTable("replay_runs", {
+  id: serial("id").primaryKey(),
+  paramSetId: integer("param_set_id").notNull().references(() => strategyParameters.id, { onDelete: "cascade" }),
+  baselineParamSetId: integer("baseline_param_set_id").references(() => strategyParameters.id, { onDelete: "set null" }),
+  startDate: timestamp("start_date", tz).notNull(),
+  endDate: timestamp("end_date", tz).notNull(),
+  totalSignals: integer("total_signals").notNull().default(0),
+  wins: integer("wins").notNull().default(0),
+  losses: integer("losses").notNull().default(0),
+  missed: integer("missed").notNull().default(0),
+  durationMs: integer("duration_ms").notNull().default(0),
+  resultJson: jsonb("result_json"),
   createdAt: timestamp("created_at", tz).notNull().defaultNow(),
 });
 
@@ -228,6 +271,7 @@ export const insertAlertEventSchema = createInsertSchema(alertEvents).omit({ id:
 export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });
 export const insertStrategyParametersSchema = createInsertSchema(strategyParameters).omit({ id: true, createdAt: true });
 export const insertTradeAnalysisSchema = createInsertSchema(tradeAnalyses).omit({ id: true, analyzedAt: true });
+export const insertReplayRunSchema = createInsertSchema(replayRuns).omit({ id: true, createdAt: true });
 
 export type Instrument = typeof instruments.$inferSelect;
 export type InsertInstrument = z.infer<typeof insertInstrumentSchema>;
@@ -249,6 +293,8 @@ export type StrategyParameters = typeof strategyParameters.$inferSelect;
 export type InsertStrategyParameters = z.infer<typeof insertStrategyParametersSchema>;
 export type TradeAnalysis = typeof tradeAnalyses.$inferSelect;
 export type InsertTradeAnalysis = z.infer<typeof insertTradeAnalysisSchema>;
+export type ReplayRun = typeof replayRuns.$inferSelect;
+export type InsertReplayRun = z.infer<typeof insertReplayRunSchema>;
 
 export const DEFAULT_STRATEGY_PARAMS: StrategyParamsConfig = {
   trendContinuation: {
@@ -264,6 +310,11 @@ export const DEFAULT_STRATEGY_PARAMS: StrategyParamsConfig = {
     rangeLookbackBars: 20,
     atrStopMultiplier: 1.2,
     riskRewardRatio: 2,
+  },
+  confluence: {
+    requireHtfAlignment: false,
+    htfTimeframe: "4h",
+    htfEma200SlopeBars: 4,
   },
 };
 

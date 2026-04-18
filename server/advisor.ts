@@ -790,3 +790,108 @@ CRITICAL RULES:
 
   return response.choices[0]?.message?.content || "Optimizer recommendations could not be generated.";
 }
+
+/**
+ * Optimizer write-back: produces a CONCRETE candidate parameter set (JSON) plus a
+ * structured rationale, using the active set as the baseline. This is the closing-the-loop
+ * counterpart to `generateStrategyOptimizer` (which returns prose).
+ *
+ * Heuristics are intentionally conservative: each suggestion shifts a single parameter
+ * a small step in the direction the data favors and only when sample size is meaningful.
+ * The user reviews the candidate (in the Parameter History page) and decides whether to
+ * promote it to shadow or active.
+ */
+export async function generateOptimizerCandidate(): Promise<{
+  baseline: { id: number; version: number; name: string };
+  proposedParams: import("@shared/schema").StrategyParamsConfig;
+  rationale: { changes: Array<{ path: string; from: any; to: any; reason: string }>; sampleSize: number };
+} | null> {
+  const baseline = await storage.getActiveStrategyParameters();
+  const stats = await storage.getBacktestStats();
+  const archived = await storage.getArchivedSignals({ limit: 500 });
+
+  if (archived.length < 10) {
+    return null;
+  }
+
+  // Per-strategy resolved buckets.
+  const tcResolved = archived.filter((s) => s.strategy === "TREND_CONTINUATION" && (s.outcome === "WIN" || s.outcome === "LOSS"));
+  const rbResolved = archived.filter((s) => s.strategy === "RANGE_BREAKOUT" && (s.outcome === "WIN" || s.outcome === "LOSS"));
+
+  const proposed: import("@shared/schema").StrategyParamsConfig = JSON.parse(JSON.stringify(baseline.params));
+  const changes: Array<{ path: string; from: any; to: any; reason: string }> = [];
+
+  type ReasonShape = { adx?: number };
+  const adxOf = (rj: unknown): number => {
+    const v = (rj && typeof rj === "object" ? (rj as ReasonShape).adx : undefined);
+    return typeof v === "number" ? v : 0;
+  };
+
+  // 1) ADX threshold for TREND_CONTINUATION — bump up if low-ADX setups underperform.
+  if (tcResolved.length >= 8) {
+    const lowAdxLosses = tcResolved.filter((s) => s.outcome === "LOSS" && adxOf(s.reasonJson) < 22).length;
+    const lowAdxWins = tcResolved.filter((s) => s.outcome === "WIN" && adxOf(s.reasonJson) < 22).length;
+    if (lowAdxLosses > lowAdxWins * 1.5 && proposed.trendContinuation.adxThreshold < 28) {
+      const from = proposed.trendContinuation.adxThreshold;
+      proposed.trendContinuation.adxThreshold = Math.min(28, from + 4);
+      changes.push({
+        path: "trendContinuation.adxThreshold",
+        from,
+        to: proposed.trendContinuation.adxThreshold,
+        reason: `Low-ADX (<22) setups produced ${lowAdxLosses} losses vs ${lowAdxWins} wins; raising threshold filters the weakest trends.`,
+      });
+    }
+  }
+
+  // 2) Score threshold — if 0-39 score range loses badly relative to taken wins, push the floor up.
+  const lowScoreLoss = archived.filter((s) => s.score < 40 && s.outcome === "LOSS").length;
+  const lowScoreWin = archived.filter((s) => s.score < 40 && s.outcome === "WIN").length;
+  if (lowScoreLoss > lowScoreWin * 2 && proposed.trendContinuation.scoreThreshold < 60) {
+    const from = proposed.trendContinuation.scoreThreshold;
+    proposed.trendContinuation.scoreThreshold = Math.min(60, from + 10);
+    changes.push({
+      path: "trendContinuation.scoreThreshold",
+      from,
+      to: proposed.trendContinuation.scoreThreshold,
+      reason: `Score <40 setups lost ${lowScoreLoss} vs won ${lowScoreWin}; raising score floor cuts the noise.`,
+    });
+  }
+
+  // 3) RANGE_BREAKOUT: if ADX-near-ceiling setups disproportionately fail, tighten the ceiling.
+  if (rbResolved.length >= 8) {
+    const tightAdxLoss = rbResolved.filter((s) => s.outcome === "LOSS" && adxOf(s.reasonJson) > proposed.rangeBreakout.adxCeiling - 4).length;
+    const tightAdxWin = rbResolved.filter((s) => s.outcome === "WIN" && adxOf(s.reasonJson) > proposed.rangeBreakout.adxCeiling - 4).length;
+    if (tightAdxLoss > tightAdxWin * 1.5 && proposed.rangeBreakout.adxCeiling > 12) {
+      const from = proposed.rangeBreakout.adxCeiling;
+      proposed.rangeBreakout.adxCeiling = Math.max(12, from - 2);
+      changes.push({
+        path: "rangeBreakout.adxCeiling",
+        from,
+        to: proposed.rangeBreakout.adxCeiling,
+        reason: `ADX-near-ceiling breakouts lost ${tightAdxLoss} vs won ${tightAdxWin}; tightening ceiling avoids late-trend traps.`,
+      });
+    }
+  }
+
+  // 4) HTF confluence — if recent overall win rate is sub-50% with enough data, propose enabling it.
+  if (stats.total >= 20 && stats.wins + stats.losses > 0) {
+    const wr = stats.wins / (stats.wins + stats.losses);
+    if (wr < 0.5 && !proposed.confluence?.requireHtfAlignment) {
+      proposed.confluence = { ...(proposed.confluence ?? { htfTimeframe: "4h" as const, htfEma200SlopeBars: 4 }), requireHtfAlignment: true };
+      changes.push({
+        path: "confluence.requireHtfAlignment",
+        from: false,
+        to: true,
+        reason: `Resolved win rate ${(wr * 100).toFixed(1)}% < 50% across ${stats.wins + stats.losses} trades; gating with 4h trend alignment should lift quality at the cost of frequency.`,
+      });
+    }
+  }
+
+  if (!changes.length) return null;
+
+  return {
+    baseline: { id: baseline.id, version: baseline.version, name: baseline.name },
+    proposedParams: proposed,
+    rationale: { changes, sampleSize: archived.length },
+  };
+}

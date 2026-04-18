@@ -15,6 +15,8 @@ import SettingsPage from "@/pages/settings";
 import BacktestPage from "@/pages/backtest";
 import AdvisorPage from "@/pages/advisor";
 import PerformancePage from "@/pages/performance";
+import SimulatorPage from "@/pages/simulator";
+import ParameterHistoryPage from "@/pages/parameter-history";
 
 function Router() {
   return (
@@ -23,6 +25,8 @@ function Router() {
       <Route path="/signals" component={SignalsPage} />
       <Route path="/backtest" component={BacktestPage} />
       <Route path="/performance" component={PerformancePage} />
+      <Route path="/simulator" component={SimulatorPage} />
+      <Route path="/parameters" component={ParameterHistoryPage} />
       <Route path="/advisor" component={AdvisorPage} />
       <Route path="/instruments" component={InstrumentsPage} />
       <Route path="/instruments/:symbol" component={SymbolView} />

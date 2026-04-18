@@ -137,8 +137,12 @@ export async function runScanCycle(timeframe: string, maxPerBurst: number = 4, b
   log(`Scan started: ${timeframe} (run #${scanRun.id})`, "scanner");
 
   try {
-    const activeParams = await storage.getActiveStrategyParameters();
+    const allActive = await storage.getActiveAndShadowStrategyParameters();
+    const activeParams = allActive.find((p) => p.isActive) ?? (await storage.getActiveStrategyParameters());
+    const shadowParams = allActive.filter((p) => !p.isActive);
     const paramsConfig = activeParams.params;
+    // Pull 4h whenever ANY active or shadow set requires HTF confluence.
+    const needsHtf = [activeParams, ...shadowParams].some((p) => p.params.confluence?.requireHtfAlignment);
     const instruments = await storage.getEnabledInstruments();
     let processedCount = 0;
     let signalCount = 0;
@@ -149,7 +153,7 @@ export async function runScanCycle(timeframe: string, maxPerBurst: number = 4, b
     for (let i = 0; i < instruments.length; i += maxPerBurst) {
       const burst = instruments.slice(i, i + maxPerBurst);
 
-      const results = await Promise.allSettled(burst.map((inst) => processInstrument(inst, paramsConfig, activeParams.version)));
+      const results = await Promise.allSettled(burst.map((inst) => processInstrument(inst, activeParams, shadowParams, needsHtf)));
       results.forEach((res, idx) => {
         const inst = burst[idx];
         if (res.status === "fulfilled") {
@@ -282,7 +286,12 @@ interface ProcessResult {
   rejections: StrategyRejection[];
 }
 
-async function processInstrument(inst: Instrument, paramsConfig: StrategyParamsConfig, paramSetVersion: number): Promise<ProcessResult> {
+async function processInstrument(
+  inst: Instrument,
+  activeParams: { id: number; version: number; params: StrategyParamsConfig },
+  shadowParams: Array<{ id: number; version: number; params: StrategyParamsConfig }>,
+  needsHtf: boolean,
+): Promise<ProcessResult> {
   // Freshness gate: if scan_progress already covers the latest expected closed 15m bar, skip the API entirely.
   const expectedEntryBoundary = expectedLatestClosedBoundary("15m");
   const progress = await storage.getScanProgress(inst.id, "15m");
@@ -290,15 +299,22 @@ async function processInstrument(inst: Instrument, paramsConfig: StrategyParamsC
     return { signalCount: 0, skippedFresh: true, rejections: [] };
   }
 
-  // Combined batch fetch for both timeframes
-  const multi = await fetchAllIndicatorsForSymbolMulti(inst.vendorSymbol, ["15min", "1h"], 100);
+  // Combined batch fetch for required timeframes (15m + 1h, plus 4h if any param set
+  // requires HTF confluence).
+  const intervals = needsHtf ? ["15min", "1h", "4h"] : ["15min", "1h"];
+  const multi = await fetchAllIndicatorsForSymbolMulti(inst.vendorSymbol, intervals, 100);
   await persistPack(inst, "15m", multi["15min"]);
   await persistPack(inst, "1h", multi["1h"]);
+  if (needsHtf && multi["4h"]) {
+    await persistPack(inst, "4h", multi["4h"]);
+  }
 
   const entryCandles = await storage.getCandles(inst.id, "15m", 100);
   const entryIndicators = await storage.getIndicators(inst.id, "15m", 100);
   const biasCandles = await storage.getCandles(inst.id, "1h", 20);
   const biasIndicators = await storage.getIndicators(inst.id, "1h", 20);
+  const htfCandles = needsHtf ? await storage.getCandles(inst.id, "4h", 20) : [];
+  const htfIndicators = needsHtf ? await storage.getIndicators(inst.id, "4h", 20) : [];
 
   const now = new Date();
   const latestClosedEntry = getLatestClosedCandle(entryCandles, "15m", now);
@@ -314,6 +330,15 @@ async function processInstrument(inst: Instrument, paramsConfig: StrategyParamsC
 
   const entryForEval = entryCandles.filter((c) => c.datetimeUtc.getTime() <= latestClosedEntry.datetimeUtc.getTime());
   const biasForEval = biasCandles.filter((c) => c.datetimeUtc.getTime() <= latestClosedBias.datetimeUtc.getTime());
+  // HTF bar timestamps are bar-OPEN times, so a bar is only "closed" once
+  // datetimeUtc + 4h has passed. The cutoff is the latest closed 15m bar's CLOSE time
+  // (latestClosedEntry.datetimeUtc + 15m). Filter both candles AND indicators by this
+  // boundary so the confluence gate can never read an unclosed 4h bar.
+  const FOUR_H_MS = 4 * 60 * 60 * 1000;
+  const FIFTEEN_M_MS = 15 * 60 * 1000;
+  const cutoffMs = latestClosedEntry.datetimeUtc.getTime() + FIFTEEN_M_MS;
+  const htfForEval = htfCandles.filter((c) => c.datetimeUtc.getTime() + FOUR_H_MS <= cutoffMs);
+  const htfIndicatorsForEval = htfIndicators.filter((i) => i.datetimeUtc.getTime() + FOUR_H_MS <= cutoffMs);
 
   if (!entryForEval.length || !biasForEval.length) {
     return { signalCount: 0, skippedFresh: false, rejections: [{ strategy: "ALL", reason: "no_eval_candles" }] };
@@ -327,22 +352,29 @@ async function processInstrument(inst: Instrument, paramsConfig: StrategyParamsC
     return { signalCount: 0, skippedFresh: false, rejections: [{ strategy: "ALL", reason: "missing_indicators" }] };
   }
 
+  // === Live evaluation against the active parameter set ===
   const stratResults = evaluateStrategies({
     instrumentId: inst.id,
     entryCandles: entryForEval,
     entryIndicators,
     biasCandles: biasForEval,
     biasIndicators,
+    htfCandles: htfForEval.length ? htfForEval : undefined,
+    htfIndicators: htfIndicatorsForEval.length ? htfIndicatorsForEval : undefined,
     entryTimeframe: "15m",
-    params: paramsConfig,
+    params: activeParams.params,
   });
 
   let signalCount = 0;
+  const settings = await storage.getSettings();
   for (const result of stratResults.accepted) {
-    const existing = await storage.findActiveSignal(inst.id, "15m", result.strategy, result.direction);
-    if (existing) {
-      continue;
-    }
+    // Dedupe LIVE signals only — must scope by mode='live' and the active paramSetId so
+    // unresolved shadow signals (also persisted as NEW) cannot suppress live signal creation.
+    const existing = await storage.findActiveSignal(inst.id, "15m", result.strategy, result.direction, {
+      mode: "live",
+      paramSetId: activeParams.id,
+    });
+    if (existing) continue;
 
     const summaryText = summarizeSignal(result.strategy, result.direction, result.reasonJson);
     const signal = await storage.upsertSignal({
@@ -354,15 +386,50 @@ async function processInstrument(inst: Instrument, paramsConfig: StrategyParamsC
       score: result.score,
       reasonJson: result.reasonJson,
       status: "NEW",
-      paramSetVersion,
+      paramSetVersion: activeParams.version,
+      paramSetId: activeParams.id,
+      mode: "live",
       summaryText,
     });
 
     signalCount++;
 
-    const settings = await storage.getSettings();
     if (settings.emailEnabled && signal.status === "NEW" && result.score >= settings.minScoreToAlert) {
       await sendSignalAlert(signal, inst, result.reasonJson, settings);
+    }
+  }
+
+  // === Shadow evaluation: every shadow set scored on the same bar, persisted with mode='shadow'.
+  // No alerts, no dedupe across the shadow set (uniqueness comes from paramSetId+mode in the index).
+  // Outcomes will be filled in by resolveActiveSignals/expireOldSignals like live signals.
+  for (const shadow of shadowParams) {
+    const shadowEval = evaluateStrategies({
+      instrumentId: inst.id,
+      entryCandles: entryForEval,
+      entryIndicators,
+      biasCandles: biasForEval,
+      biasIndicators,
+      htfCandles: htfForEval.length ? htfForEval : undefined,
+      htfIndicators: htfIndicatorsForEval.length ? htfIndicatorsForEval : undefined,
+      entryTimeframe: "15m",
+      params: shadow.params,
+    });
+    for (const result of shadowEval.accepted) {
+      const summaryText = summarizeSignal(result.strategy, result.direction, result.reasonJson);
+      await storage.upsertSignal({
+        instrumentId: inst.id,
+        timeframe: "15m",
+        strategy: result.strategy,
+        direction: result.direction,
+        candleDatetimeUtc: latestClosedEntry.datetimeUtc,
+        score: result.score,
+        reasonJson: result.reasonJson,
+        status: "NEW",
+        paramSetVersion: shadow.version,
+        paramSetId: shadow.id,
+        mode: "shadow",
+        summaryText,
+      });
     }
   }
 

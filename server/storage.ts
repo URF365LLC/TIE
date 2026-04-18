@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { eq, and, desc, sql, lt, inArray, or, isNull, type SQL } from "drizzle-orm";
+import { eq, and, desc, asc, sql, lt, lte, gte, inArray, or, isNull, type SQL } from "drizzle-orm";
 import {
   instruments,
   candles,
@@ -11,6 +11,7 @@ import {
   settings,
   tradeAnalyses,
   strategyParameters,
+  replayRuns,
   DEFAULT_STRATEGY_PARAMS,
   type Instrument,
   type InsertInstrument,
@@ -34,6 +35,8 @@ import {
   type InsertStrategyParameters,
   type StrategyParamsConfig,
   type SignalWithInstrument,
+  type ReplayRun,
+  type InsertReplayRun,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -60,7 +63,7 @@ export interface IStorage {
   getSignalById(id: number): Promise<SignalWithInstrument | undefined>;
   getSignals(filters?: { strategy?: string; direction?: string; status?: string; activeOnly?: boolean; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]>;
   getArchivedSignals(filters?: { strategy?: string; direction?: string; outcome?: string; symbol?: string; limit?: number }): Promise<SignalWithInstrument[]>;
-  findActiveSignal(instrumentId: number, timeframe: string, strategy: string, direction: string): Promise<Signal | undefined>;
+  findActiveSignal(instrumentId: number, timeframe: string, strategy: string, direction: string, opts?: { mode?: string; paramSetId?: number }): Promise<Signal | undefined>;
   getActiveSignalsOlderThan(maxAgeMs: number): Promise<Signal[]>;
   getUnresolvedSignals(maxAgeMs: number): Promise<Signal[]>;
   upsertSignal(data: InsertSignal): Promise<Signal>;
@@ -76,6 +79,16 @@ export interface IStorage {
   createStrategyParameters(data: InsertStrategyParameters): Promise<StrategyParameters>;
   setActiveStrategyParameters(id: number): Promise<StrategyParameters>;
   ensureDefaultStrategyParameters(): Promise<StrategyParameters>;
+  // Self-improvement loop additions:
+  getActiveAndShadowStrategyParameters(): Promise<StrategyParameters[]>;
+  setStrategyParameterStatus(id: number, status: "draft" | "shadow" | "archived", rationale?: any): Promise<StrategyParameters>;
+  getCandlesInRange(instrumentId: number, timeframe: string, from: Date, to: Date): Promise<Candle[]>;
+  getIndicatorsInRange(instrumentId: number, timeframe: string, from: Date, to: Date): Promise<Indicator[]>;
+  createReplayRun(data: InsertReplayRun): Promise<ReplayRun>;
+  listReplayRuns(paramSetId?: number, limit?: number): Promise<ReplayRun[]>;
+  getReplayRunById(id: number): Promise<ReplayRun | undefined>;
+  getParamSetLifetimeStats(paramSetId: number): Promise<{ total: number; wins: number; losses: number; missed: number; winRate: number | null }>;
+  getRollingWinRateByParamSet(windowDays: number): Promise<Array<{ paramSetId: number; version: number; name: string; status: string; total: number; wins: number; losses: number; winRate: number | null }>>;
 
   // Performance analytics aggregates and rejection telemetry
   getPerformanceAggregates(groupBy: "pair" | "strategy" | "direction" | "asset" | "session" | "hour"): Promise<Array<{ key: string; total: number; wins: number; losses: number; missed: number }>>;
@@ -298,20 +311,17 @@ export class DatabaseStorage implements IStorage {
     return rows.map((r) => ({ ...r.signals, instrument: r.instruments }));
   }
 
-  async findActiveSignal(instrumentId: number, timeframe: string, strategy: string, direction: string): Promise<Signal | undefined> {
-    const [row] = await db
-      .select()
-      .from(signals)
-      .where(
-        and(
-          eq(signals.instrumentId, instrumentId),
-          eq(signals.timeframe, timeframe),
-          eq(signals.strategy, strategy),
-          eq(signals.direction, direction),
-          inArray(signals.status, ["NEW", "ALERTED"]),
-        )
-      )
-      .limit(1);
+  async findActiveSignal(instrumentId: number, timeframe: string, strategy: string, direction: string, opts?: { mode?: string; paramSetId?: number }): Promise<Signal | undefined> {
+    const conditions = [
+      eq(signals.instrumentId, instrumentId),
+      eq(signals.timeframe, timeframe),
+      eq(signals.strategy, strategy),
+      eq(signals.direction, direction),
+      inArray(signals.status, ["NEW", "ALERTED"]),
+    ];
+    if (opts?.mode) conditions.push(eq(signals.mode, opts.mode));
+    if (opts?.paramSetId !== undefined) conditions.push(eq(signals.paramSetId, opts.paramSetId));
+    const [row] = await db.select().from(signals).where(and(...conditions)).limit(1);
     return row;
   }
 
@@ -320,12 +330,24 @@ export class DatabaseStorage implements IStorage {
       .insert(signals)
       .values(data)
       .onConflictDoUpdate({
-        target: [signals.instrumentId, signals.timeframe, signals.strategy, signals.direction, signals.candleDatetimeUtc],
+        // The unique index now includes mode + paramSetId so live and per-shadow-set
+        // signals on the same bar do not collide.
+        target: [
+          signals.instrumentId,
+          signals.timeframe,
+          signals.strategy,
+          signals.direction,
+          signals.candleDatetimeUtc,
+          signals.mode,
+          signals.paramSetId,
+        ],
         set: {
           score: data.score,
           reasonJson: data.reasonJson,
           detectedAt: new Date(),
           paramSetVersion: data.paramSetVersion,
+          paramSetId: data.paramSetId,
+          mode: data.mode ?? "live",
           summaryText: data.summaryText,
         },
       })
@@ -401,10 +423,16 @@ export class DatabaseStorage implements IStorage {
 
   async setActiveStrategyParameters(id: number): Promise<StrategyParameters> {
     return await db.transaction(async (tx) => {
-      await tx.update(strategyParameters).set({ isActive: false });
+      // Demote the previously-active row (if any) to "shadow" so it keeps producing
+      // shadow signals for direct head-to-head comparison with the new active set.
+      // The user can manually archive it later from the parameter history page.
+      await tx
+        .update(strategyParameters)
+        .set({ isActive: false, status: "shadow", archivedAt: null })
+        .where(eq(strategyParameters.isActive, true));
       const [row] = await tx
         .update(strategyParameters)
-        .set({ isActive: true })
+        .set({ isActive: true, status: "active", activatedAt: new Date(), archivedAt: null })
         .where(eq(strategyParameters.id, id))
         .returning();
       if (!row) throw new Error(`strategy_parameters id ${id} not found`);
@@ -416,10 +444,15 @@ export class DatabaseStorage implements IStorage {
     const existing = await db.select().from(strategyParameters).limit(1);
     if (existing.length > 0) {
       const active = existing.find((r) => r.isActive);
-      if (active) return active;
+      if (active) {
+        if (active.status !== "active") {
+          await db.update(strategyParameters).set({ status: "active", activatedAt: active.activatedAt ?? new Date() }).where(eq(strategyParameters.id, active.id));
+        }
+        return active;
+      }
       const [promoted] = await db
         .update(strategyParameters)
-        .set({ isActive: true })
+        .set({ isActive: true, status: "active", activatedAt: new Date() })
         .where(eq(strategyParameters.id, existing[0].id))
         .returning();
       return promoted;
@@ -431,10 +464,125 @@ export class DatabaseStorage implements IStorage {
         name: "v1 (initial defaults)",
         description: "Initial strategy parameter set seeded from hardcoded constants.",
         isActive: true,
+        status: "active",
+        activatedAt: new Date(),
         params: DEFAULT_STRATEGY_PARAMS,
       })
       .returning();
     return row;
+  }
+
+  async getActiveAndShadowStrategyParameters(): Promise<StrategyParameters[]> {
+    return db
+      .select()
+      .from(strategyParameters)
+      .where(or(eq(strategyParameters.isActive, true), eq(strategyParameters.status, "shadow"))!)
+      .orderBy(desc(strategyParameters.isActive), desc(strategyParameters.version));
+  }
+
+  async setStrategyParameterStatus(id: number, status: "draft" | "shadow" | "archived", rationale?: any): Promise<StrategyParameters> {
+    const patch: Partial<typeof strategyParameters.$inferInsert> = { status };
+    if (status === "archived") patch.archivedAt = new Date();
+    if (status === "shadow") patch.archivedAt = null;
+    if (rationale !== undefined) patch.rationale = rationale;
+    const [row] = await db.update(strategyParameters).set(patch).where(eq(strategyParameters.id, id)).returning();
+    if (!row) throw new Error(`strategy_parameters id ${id} not found`);
+    return row;
+  }
+
+  async getCandlesInRange(instrumentId: number, timeframe: string, from: Date, to: Date): Promise<Candle[]> {
+    return db
+      .select()
+      .from(candles)
+      .where(
+        and(
+          eq(candles.instrumentId, instrumentId),
+          eq(candles.timeframe, timeframe),
+          gte(candles.datetimeUtc, from),
+          lte(candles.datetimeUtc, to),
+        ),
+      )
+      .orderBy(asc(candles.datetimeUtc));
+  }
+
+  async getIndicatorsInRange(instrumentId: number, timeframe: string, from: Date, to: Date): Promise<Indicator[]> {
+    return db
+      .select()
+      .from(indicators)
+      .where(
+        and(
+          eq(indicators.instrumentId, instrumentId),
+          eq(indicators.timeframe, timeframe),
+          gte(indicators.datetimeUtc, from),
+          lte(indicators.datetimeUtc, to),
+        ),
+      )
+      .orderBy(asc(indicators.datetimeUtc));
+  }
+
+  async createReplayRun(data: InsertReplayRun): Promise<ReplayRun> {
+    const [row] = await db.insert(replayRuns).values(data).returning();
+    return row;
+  }
+
+  async listReplayRuns(paramSetId?: number, limit = 50): Promise<ReplayRun[]> {
+    const cond = paramSetId ? eq(replayRuns.paramSetId, paramSetId) : undefined;
+    return db.select().from(replayRuns).where(cond).orderBy(desc(replayRuns.createdAt)).limit(limit);
+  }
+
+  async getReplayRunById(id: number): Promise<ReplayRun | undefined> {
+    const [row] = await db.select().from(replayRuns).where(eq(replayRuns.id, id)).limit(1);
+    return row;
+  }
+
+  async getParamSetLifetimeStats(paramSetId: number): Promise<{ total: number; wins: number; losses: number; missed: number; winRate: number | null }> {
+    const [row] = await db
+      .select({
+        total: sql<number>`count(*) filter (where ${signals.outcome} in ('WIN','LOSS','MISSED'))::int`,
+        wins: sql<number>`count(*) filter (where ${signals.outcome} = 'WIN')::int`,
+        losses: sql<number>`count(*) filter (where ${signals.outcome} = 'LOSS')::int`,
+        missed: sql<number>`count(*) filter (where ${signals.outcome} = 'MISSED')::int`,
+      })
+      .from(signals)
+      .where(eq(signals.paramSetId, paramSetId));
+    const decided = (row?.wins ?? 0) + (row?.losses ?? 0);
+    return {
+      total: row?.total ?? 0,
+      wins: row?.wins ?? 0,
+      losses: row?.losses ?? 0,
+      missed: row?.missed ?? 0,
+      winRate: decided > 0 ? (row!.wins / decided) * 100 : null,
+    };
+  }
+
+  // Rolling 30d (or N day) win-rate per parameter set, joined to the strategyParameters
+  // metadata so the dashboard can show a per-version trend line at a glance.
+  async getRollingWinRateByParamSet(windowDays: number): Promise<Array<{ paramSetId: number; version: number; name: string; status: string; total: number; wins: number; losses: number; winRate: number | null }>> {
+    const cutoff = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+    const rows = await db
+      .select({
+        paramSetId: strategyParameters.id,
+        version: strategyParameters.version,
+        name: strategyParameters.name,
+        status: strategyParameters.status,
+        total: sql<number>`count(${signals.id}) filter (where ${signals.outcome} in ('WIN','LOSS'))::int`,
+        wins: sql<number>`count(${signals.id}) filter (where ${signals.outcome} = 'WIN')::int`,
+        losses: sql<number>`count(${signals.id}) filter (where ${signals.outcome} = 'LOSS')::int`,
+      })
+      .from(strategyParameters)
+      .leftJoin(
+        signals,
+        and(
+          eq(signals.paramSetId, strategyParameters.id),
+          gte(signals.detectedAt, cutoff),
+        ),
+      )
+      .groupBy(strategyParameters.id, strategyParameters.version, strategyParameters.name, strategyParameters.status)
+      .orderBy(desc(strategyParameters.version));
+    return rows.map((r) => ({
+      ...r,
+      winRate: r.total > 0 ? (r.wins / r.total) * 100 : null,
+    }));
   }
 
   async getScanRunById(id: number): Promise<ScanRun | undefined> {

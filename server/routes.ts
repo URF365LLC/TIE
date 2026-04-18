@@ -5,9 +5,10 @@ import { runScanCycle } from "./scanner";
 import { WHITELIST, canonicalToVendor } from "@shared/schema";
 import { log } from "./logger";
 import { z } from "zod";
-import { analyzePortfolio, analyzeTradeDeep, batchAnalyzeTrades, generateStrategyGuide, generateStrategyOptimizer } from "./advisor";
+import { analyzePortfolio, analyzeTradeDeep, batchAnalyzeTrades, generateStrategyGuide, generateStrategyOptimizer, generateOptimizerCandidate } from "./advisor";
 import { insertStrategyParametersSchema } from "@shared/schema";
 import { summarizeSignal } from "./summary";
+import { runReplay } from "./replay";
 
 const journalSchema = z.object({
   notes: z.string().max(5000).nullable().optional(),
@@ -30,6 +31,16 @@ const strategyParamsConfigSchema = z.object({
     atrStopMultiplier: z.number().min(0.1).max(10),
     riskRewardRatio: z.number().min(0.5).max(10),
   }),
+  confluence: z
+    .object({
+      requireHtfAlignment: z.boolean(),
+      htfTimeframe: z.literal("4h"),
+      htfEma200SlopeBars: z.number().int().min(2).max(20),
+      requireKeyLevels: z.boolean().optional(),
+      keyLevelProximityPct: z.number().min(0).max(10).optional(),
+      appliesTo: z.array(z.enum(["TREND_CONTINUATION", "RANGE_BREAKOUT"])).optional(),
+    })
+    .optional(),
 });
 
 const settingsUpdateSchema = z.object({
@@ -411,6 +422,168 @@ export async function registerRoutes(
       log(`Strategy optimizer error: ${err.message}`, "advisor");
       res.status(500).json({ message: err.message });
     }
+  });
+
+  // ─── Self-improvement loop ────────────────────────────────────────────────
+
+  // Optimizer write-back: returns a CONCRETE candidate parameter set + rationale
+  // OR optionally persists it as a draft (saveAsDraft=true) for the user to review.
+  app.post("/api/advisor/optimizer-candidate", async (req, res) => {
+    try {
+      const candidate = await generateOptimizerCandidate();
+      if (!candidate) {
+        return res.status(200).json({ candidate: null, message: "Not enough resolved signals or no high-confidence change suggested." });
+      }
+      const saveAsDraft = req.body?.saveAsDraft === true;
+      let saved = null;
+      if (saveAsDraft) {
+        const all = await storage.listStrategyParameters();
+        const nextVersion = all.length === 0 ? 1 : Math.max(...all.map((r) => r.version)) + 1;
+        saved = await storage.createStrategyParameters({
+          version: nextVersion,
+          name: `v${nextVersion} (optimizer candidate)`,
+          description: `Auto-generated from active v${candidate.baseline.version} based on ${candidate.rationale.sampleSize} archived signals.`,
+          isActive: false,
+          status: "draft",
+          parentId: candidate.baseline.id,
+          rationale: candidate.rationale,
+          params: candidate.proposedParams,
+        });
+      }
+      res.json({ candidate, saved });
+    } catch (err: any) {
+      log(`Optimizer candidate error: ${err.message}`, "advisor");
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // Replay (what-if) — runs synchronously over stored data; large ranges may take seconds.
+  // When `compareParamSetId` or `compareParams` is provided, runs BOTH and returns a
+  // baseline-vs-proposed comparison over the SAME window so deltas are like-for-like.
+  app.post("/api/replay", async (req, res) => {
+    const schema = z.object({
+      paramSetId: z.number().int().positive().optional(),
+      params: strategyParamsConfigSchema.optional(),
+      compareParamSetId: z.number().int().positive().optional(),
+      compareParams: strategyParamsConfigSchema.optional(),
+      startDate: z.string(),
+      endDate: z.string(),
+      symbols: z.array(z.string()).optional(),
+      evalWindowHours: z.number().int().min(1).max(48).optional(),
+      persist: z.boolean().optional(),
+    }).refine((d) => d.paramSetId || d.params, { message: "either paramSetId or params is required" });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: "Invalid payload", errors: parsed.error.flatten() });
+
+    try {
+      const all = await storage.listStrategyParameters();
+      async function resolve(id?: number, params?: any): Promise<{ id: number; version: number; cfg: any } | null> {
+        if (id) {
+          const set = all.find((p) => p.id === id);
+          if (!set) return null;
+          return { id: set.id, version: set.version, cfg: set.params };
+        }
+        if (params) return { id: 0, version: 0, cfg: params };
+        return null;
+      }
+      const baseline = await resolve(parsed.data.paramSetId, parsed.data.params);
+      if (!baseline) return res.status(404).json({ message: "baseline param set not found" });
+      const proposed = await resolve(parsed.data.compareParamSetId, parsed.data.compareParams);
+
+      const startDate = new Date(parsed.data.startDate);
+      const endDate = new Date(parsed.data.endDate);
+
+      const baselineResult = await runReplay({
+        paramSetId: baseline.id,
+        paramSetVersion: baseline.version,
+        paramsConfig: baseline.cfg,
+        startDate,
+        endDate,
+        symbols: parsed.data.symbols,
+        evalWindowHours: parsed.data.evalWindowHours,
+      });
+
+      let proposedResult = null;
+      let comparison = null;
+      if (proposed) {
+        proposedResult = await runReplay({
+          paramSetId: proposed.id,
+          paramSetVersion: proposed.version,
+          paramsConfig: proposed.cfg,
+          startDate,
+          endDate,
+          symbols: parsed.data.symbols,
+          evalWindowHours: parsed.data.evalWindowHours,
+        });
+        comparison = {
+          deltaSignals: proposedResult.totalSignals - baselineResult.totalSignals,
+          deltaWinRate: (proposedResult.winRate ?? 0) - (baselineResult.winRate ?? 0),
+          deltaExpectancyR: (proposedResult.expectancyR ?? 0) - (baselineResult.expectancyR ?? 0),
+        };
+      }
+
+      if (parsed.data.persist && baseline.id) {
+        await storage.createReplayRun({
+          paramSetId: baseline.id,
+          startDate,
+          endDate,
+          totalSignals: baselineResult.totalSignals,
+          wins: baselineResult.wins,
+          losses: baselineResult.losses,
+          missed: baselineResult.missed,
+          durationMs: baselineResult.durationMs,
+          resultJson: { baseline: baselineResult, proposed: proposedResult, comparison },
+        });
+      }
+
+      // Single-run callers see the original shape; comparison callers get an extra block.
+      res.json(proposedResult ? { ...baselineResult, proposed: proposedResult, comparison } : baselineResult);
+    } catch (err: any) {
+      log(`Replay error: ${err.message}`, "replay");
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.get("/api/replay/runs", async (req, res) => {
+    const paramSetId = req.query.paramSetId ? parseInt(String(req.query.paramSetId)) : undefined;
+    const rows = await storage.listReplayRuns(paramSetId);
+    res.json(rows);
+  });
+
+  // Promote a draft → shadow (run alongside live) or shadow → archived.
+  // Promotion to ACTIVE goes through the existing /:id/activate endpoint and always
+  // requires explicit user action (this route is the gate).
+  app.post("/api/strategy-parameters/:id/status", async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "invalid id" });
+    const schema = z.object({ status: z.enum(["draft", "shadow", "archived"]) });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: "Invalid payload", errors: parsed.error.flatten() });
+    try {
+      const row = await storage.setStrategyParameterStatus(id, parsed.data.status);
+      res.json(row);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // Version history: every parameter set + lifetime stats.
+  app.get("/api/strategy-parameters/history", async (_req, res) => {
+    const all = await storage.listStrategyParameters();
+    const enriched = await Promise.all(
+      all.map(async (p) => ({
+        ...p,
+        lifetimeStats: await storage.getParamSetLifetimeStats(p.id),
+      })),
+    );
+    res.json(enriched);
+  });
+
+  // Self-improvement dashboard: rolling N-day win rate per parameter set version.
+  app.get("/api/strategy-parameters/rolling-winrate", async (req, res) => {
+    const days = Math.max(1, Math.min(365, parseInt(String(req.query.days ?? "30")) || 30));
+    const rows = await storage.getRollingWinRateByParamSet(days);
+    res.json({ windowDays: days, rows });
   });
 
   return httpServer;
