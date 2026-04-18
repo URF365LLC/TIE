@@ -51,9 +51,9 @@ export default function SettingsPage() {
         accountBalance: settings.accountBalance,
         riskPercent: settings.riskPercent,
         signalEvalWindowHours: settings.signalEvalWindowHours ?? 4,
-        tdCreditLimitPerMin: (settings as any).tdCreditLimitPerMin ?? 377,
-        tdCreditTargetPerMin: (settings as any).tdCreditTargetPerMin ?? 340,
-        tdMaxConcurrency: (settings as any).tdMaxConcurrency ?? 3,
+        tdCreditLimitPerMin: settings.tdCreditLimitPerMin ?? 377,
+        tdCreditTargetPerMin: settings.tdCreditTargetPerMin ?? 340,
+        tdMaxConcurrency: settings.tdMaxConcurrency ?? 3,
       });
     }
   }, [settings]);

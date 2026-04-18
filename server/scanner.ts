@@ -1,3 +1,4 @@
+import Decimal from "decimal.js";
 import { storage } from "./storage";
 import { db } from "./db";
 import { sql } from "drizzle-orm";
@@ -145,9 +146,11 @@ export async function runScanCycle(timeframe: string, maxPerBurst: number = 4, b
     for (let i = 0; i < instruments.length; i += maxPerBurst) {
       const burst = instruments.slice(i, i + maxPerBurst);
 
-      for (const inst of burst) {
-        try {
-          const r = await processInstrument(inst);
+      const results = await Promise.allSettled(burst.map((inst) => processInstrument(inst)));
+      results.forEach((res, idx) => {
+        const inst = burst[idx];
+        if (res.status === "fulfilled") {
+          const r = res.value;
           signalCount += r.signalCount;
           if (r.skippedFresh) skippedFresh++;
           for (const rej of r.rejections) {
@@ -155,11 +158,12 @@ export async function runScanCycle(timeframe: string, maxPerBurst: number = 4, b
             rejectionTotals[key] = (rejectionTotals[key] ?? 0) + 1;
           }
           processedCount++;
-        } catch (err: any) {
-          failures.push({ symbol: inst.canonicalSymbol, error: err.message });
-          log(`Error processing ${inst.canonicalSymbol}: ${err.message}`, "scanner");
+        } else {
+          const err: any = res.reason;
+          failures.push({ symbol: inst.canonicalSymbol, error: err?.message ?? String(err) });
+          log(`Error processing ${inst.canonicalSymbol}: ${err?.message ?? err}`, "scanner");
         }
-      }
+      });
 
       if (i + maxPerBurst < instruments.length) {
         await sleep(burstSleepMs);
@@ -411,10 +415,13 @@ async function determineOutcomeFromCandles(
   reason: Record<string, any>,
   candleCache?: Map<string, Candle[]>
 ): Promise<{ result: string; price: number | null }> {
-  const tp = reason.takeProfit as number | undefined;
-  const sl = reason.stopLoss as number | undefined;
-  const entry = reason.entryPrice as number | undefined;
-  if (tp == null || sl == null || entry == null) return { result: "MISSED", price: null };
+  const tpRaw = reason.takeProfit;
+  const slRaw = reason.stopLoss;
+  const entryRaw = reason.entryPrice;
+  if (tpRaw == null || slRaw == null || entryRaw == null) return { result: "MISSED", price: null };
+
+  const tp = new Decimal(tpRaw);
+  const sl = new Decimal(slRaw);
 
   const detectedMs = new Date(sig.detectedAt).getTime();
   const candlesAfter = await getCachedCandles(candleCache, sig.instrumentId, sig.timeframe);
@@ -423,12 +430,14 @@ async function determineOutcomeFromCandles(
     .sort((a, b) => a.datetimeUtc.getTime() - b.datetimeUtc.getTime());
 
   for (const c of relevant) {
+    const high = new Decimal(c.high);
+    const low = new Decimal(c.low);
     if (sig.direction === "LONG") {
-      if (c.low <= sl) return { result: "LOSS", price: sl };
-      if (c.high >= tp) return { result: "WIN", price: tp };
+      if (low.lte(sl)) return { result: "LOSS", price: sl.toNumber() };
+      if (high.gte(tp)) return { result: "WIN", price: tp.toNumber() };
     } else {
-      if (c.high >= sl) return { result: "LOSS", price: sl };
-      if (c.low <= tp) return { result: "WIN", price: tp };
+      if (high.gte(sl)) return { result: "LOSS", price: sl.toNumber() };
+      if (low.lte(tp)) return { result: "WIN", price: tp.toNumber() };
     }
   }
 

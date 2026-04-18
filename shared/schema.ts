@@ -11,7 +11,20 @@ import {
   index,
   serial,
   jsonb,
+  customType,
 } from "drizzle-orm/pg-core";
+
+const priceNumeric = customType<{ data: number; driverData: string }>({
+  dataType() {
+    return "numeric(20,8)";
+  },
+  fromDriver(value: string): number {
+    return Number(value);
+  },
+  toDriver(value: number): string {
+    return String(value);
+  },
+});
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -34,10 +47,10 @@ export const candles = pgTable(
     instrumentId: integer("instrument_id").notNull().references(() => instruments.id, { onDelete: "cascade" }),
     timeframe: varchar("timeframe", { length: 5 }).notNull(),
     datetimeUtc: timestamp("datetime_utc", tz).notNull(),
-    open: doublePrecision("open").notNull(),
-    high: doublePrecision("high").notNull(),
-    low: doublePrecision("low").notNull(),
-    close: doublePrecision("close").notNull(),
+    open: priceNumeric("open").notNull(),
+    high: priceNumeric("high").notNull(),
+    low: priceNumeric("low").notNull(),
+    close: priceNumeric("close").notNull(),
     volume: doublePrecision("volume"),
     source: varchar("source", { length: 20 }).notNull().default("twelvedata"),
   },
@@ -108,7 +121,7 @@ export const signals = pgTable(
     reasonJson: jsonb("reason_json"),
     status: varchar("status", { length: 20 }).notNull().default("NEW"),
     outcome: varchar("outcome", { length: 10 }),
-    outcomePrice: doublePrecision("outcome_price"),
+    outcomePrice: priceNumeric("outcome_price"),
     resolvedAt: timestamp("resolved_at", tz),
   },
   (table) => [

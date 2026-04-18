@@ -10,6 +10,28 @@ const openai = new OpenAI({
 });
 
 const ADVISOR_MODEL = process.env.ADVISOR_MODEL || "gpt-5.1";
+const ADVISOR_FALLBACK_MODEL = process.env.ADVISOR_FALLBACK_MODEL || "gpt-4o";
+
+type ChatParams = Parameters<typeof openai.chat.completions.create>[0];
+
+async function createChatCompletion(params: ChatParams) {
+  try {
+    return await openai.chat.completions.create({ ...params, model: ADVISOR_MODEL });
+  } catch (err: any) {
+    const msg = (err?.message ?? "").toLowerCase();
+    const code = err?.code ?? err?.error?.code;
+    const isModelError =
+      err?.status === 404 ||
+      code === "model_not_found" ||
+      code === "invalid_model" ||
+      msg.includes("model") && (msg.includes("not found") || msg.includes("does not exist") || msg.includes("invalid"));
+    if (isModelError && ADVISOR_FALLBACK_MODEL && ADVISOR_FALLBACK_MODEL !== ADVISOR_MODEL) {
+      log(`Advisor model "${ADVISOR_MODEL}" unavailable, falling back to "${ADVISOR_FALLBACK_MODEL}"`, "advisor");
+      return await openai.chat.completions.create({ ...params, model: ADVISOR_FALLBACK_MODEL });
+    }
+    throw err;
+  }
+}
 
 export async function analyzePortfolio(): Promise<string> {
   const stats = await storage.getBacktestStats();
@@ -173,8 +195,7 @@ Insights that ONLY come from the ${analyzedCount} verified trade analyses:
 ` : ""}
 CRITICAL: Be direct and data-driven. Reference actual numbers, pairs, and outcomes. ${analyzedCount > 0 ? "Ground insights in verified deep-dive findings wherever possible." : "Flag that deep-dive analysis would strengthen these conclusions."}`;
 
-  const response = await openai.chat.completions.create({
-    model: ADVISOR_MODEL,
+  const response = await createChatCompletion({
     messages: [{ role: "user", content: prompt }],
     max_completion_tokens: 8192,
   });
@@ -311,8 +332,7 @@ What can the trader learn from this specific trade? What should they replicate (
 
 Be extremely detailed and technical. Reference specific prices, candle formations, and indicator values from the data provided. This analysis should teach the trader to read charts independently.`;
 
-  const response = await openai.chat.completions.create({
-    model: ADVISOR_MODEL,
+  const response = await createChatCompletion({
     messages: [{ role: "user", content: prompt }],
     max_completion_tokens: 8192,
   });
@@ -332,8 +352,7 @@ Be extremely detailed and technical. Reference specific prices, candle formation
 ANALYSIS:
 ${analysisText.slice(0, 6000)}`;
 
-    const extractRes = await openai.chat.completions.create({
-      model: ADVISOR_MODEL,
+    const extractRes = await createChatCompletion({
       messages: [{ role: "user", content: extractPrompt }],
       max_completion_tokens: 2048,
     });
@@ -532,8 +551,7 @@ CRITICAL: ${analyzedCount > 0 ? "Ground all insights in the verified deep-dive f
 
 Be extremely detailed, reference actual numbers from the data.`;
 
-  const response = await openai.chat.completions.create({
-    model: ADVISOR_MODEL,
+  const response = await createChatCompletion({
     messages: [{ role: "user", content: prompt }],
     max_completion_tokens: 8192,
   });
@@ -769,8 +787,7 @@ CRITICAL RULES:
 4. These are RECOMMENDATIONS ONLY — nothing is auto-applied. The trader reviews and decides.
 5. Quantify expected impact where possible (e.g., "based on the data, this would have prevented 3 of the 5 losses in the dataset").`;
 
-  const response = await openai.chat.completions.create({
-    model: ADVISOR_MODEL,
+  const response = await createChatCompletion({
     messages: [{ role: "user", content: prompt }],
     max_completion_tokens: 12000,
   });
