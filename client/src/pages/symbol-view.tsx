@@ -196,7 +196,7 @@ function CandleChart({ candles, indicators, signals, focusSignalId }: { candles:
         try {
           const { createSeriesMarkers } = await import("lightweight-charts");
           createSeriesMarkers(candleSeries, [{
-            time: focusTime as any,
+            time: focusTime as import("lightweight-charts").UTCTimestamp,
             position: focusSig.direction === "LONG" ? "belowBar" : "aboveBar",
             color: focusSig.direction === "LONG" ? "#22c55e" : "#ef4444",
             shape: focusSig.direction === "LONG" ? "arrowUp" : "arrowDown",

@@ -6,7 +6,7 @@ import { WHITELIST, canonicalToVendor } from "@shared/schema";
 import { log } from "./logger";
 import { z } from "zod";
 import { analyzePortfolio, analyzeTradeDeep, batchAnalyzeTrades, generateStrategyGuide, generateStrategyOptimizer } from "./advisor";
-import { insertStrategyParametersSchema, type StrategyParamsConfig } from "@shared/schema";
+import { insertStrategyParametersSchema } from "@shared/schema";
 import { summarizeSignal } from "./summary";
 
 const journalSchema = z.object({
@@ -326,7 +326,7 @@ export async function registerRoutes(
         name: parsed.data.name,
         description: parsed.data.description,
         isActive: false,
-        params: parsed.data.params as unknown as StrategyParamsConfig,
+        params: parsed.data.params,
       });
       const final = parsed.data.activate ? await storage.setActiveStrategyParameters(row.id) : row;
       res.status(201).json(final);
@@ -349,13 +349,15 @@ export async function registerRoutes(
   // ─── Learning Infrastructure: performance analytics ───────────────────────
   app.get("/api/analytics/performance", async (req, res) => {
     const allowed = ["pair", "strategy", "direction", "asset", "session", "hour"] as const;
-    const groupBy = (req.query.groupBy as string) || "pair";
-    if (!allowed.includes(groupBy as any)) {
+    type GroupBy = (typeof allowed)[number];
+    const isGroupBy = (v: string): v is GroupBy => (allowed as readonly string[]).includes(v);
+    const raw = typeof req.query.groupBy === "string" ? req.query.groupBy : "pair";
+    if (!isGroupBy(raw)) {
       return res.status(400).json({ message: `groupBy must be one of: ${allowed.join(", ")}` });
     }
     try {
-      const rows = await storage.getPerformanceAggregates(groupBy as (typeof allowed)[number]);
-      res.json({ groupBy, rows });
+      const rows = await storage.getPerformanceAggregates(raw);
+      res.json({ groupBy: raw, rows });
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }

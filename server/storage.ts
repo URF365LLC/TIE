@@ -431,7 +431,7 @@ export class DatabaseStorage implements IStorage {
         name: "v1 (initial defaults)",
         description: "Initial strategy parameter set seeded from hardcoded constants.",
         isActive: true,
-        params: DEFAULT_STRATEGY_PARAMS as unknown as StrategyParamsConfig,
+        params: DEFAULT_STRATEGY_PARAMS,
       })
       .returning();
     return row;

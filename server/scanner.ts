@@ -138,7 +138,7 @@ export async function runScanCycle(timeframe: string, maxPerBurst: number = 4, b
 
   try {
     const activeParams = await storage.getActiveStrategyParameters();
-    const paramsConfig = activeParams.params as unknown as StrategyParamsConfig;
+    const paramsConfig = activeParams.params;
     const instruments = await storage.getEnabledInstruments();
     let processedCount = 0;
     let signalCount = 0;

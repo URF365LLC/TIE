@@ -177,13 +177,30 @@ export const settings = pgTable("settings", {
   tdMaxConcurrency: integer("td_max_concurrency").notNull().default(3),
 });
 
+export interface StrategyParamsConfig {
+  trendContinuation: {
+    adxThreshold: number;
+    atrStopMultiplier: number;
+    riskRewardRatio: number;
+    scoreThreshold: number;
+    pullbackTolerance: number;
+  };
+  rangeBreakout: {
+    adxCeiling: number;
+    bbWidthPercentile: number;
+    rangeLookbackBars: number;
+    atrStopMultiplier: number;
+    riskRewardRatio: number;
+  };
+}
+
 export const strategyParameters = pgTable("strategy_parameters", {
   id: serial("id").primaryKey(),
   version: integer("version").notNull().unique(),
   name: varchar("name", { length: 100 }).notNull(),
   description: text("description"),
   isActive: boolean("is_active").notNull().default(false),
-  params: jsonb("params").notNull(),
+  params: jsonb("params").$type<StrategyParamsConfig>().notNull(),
   createdAt: timestamp("created_at", tz).notNull().defaultNow(),
 });
 
@@ -232,23 +249,6 @@ export type StrategyParameters = typeof strategyParameters.$inferSelect;
 export type InsertStrategyParameters = z.infer<typeof insertStrategyParametersSchema>;
 export type TradeAnalysis = typeof tradeAnalyses.$inferSelect;
 export type InsertTradeAnalysis = z.infer<typeof insertTradeAnalysisSchema>;
-
-export interface StrategyParamsConfig {
-  trendContinuation: {
-    adxThreshold: number;
-    atrStopMultiplier: number;
-    riskRewardRatio: number;
-    scoreThreshold: number;
-    pullbackTolerance: number;
-  };
-  rangeBreakout: {
-    adxCeiling: number;
-    bbWidthPercentile: number;
-    rangeLookbackBars: number;
-    atrStopMultiplier: number;
-    riskRewardRatio: number;
-  };
-}
 
 export const DEFAULT_STRATEGY_PARAMS: StrategyParamsConfig = {
   trendContinuation: {
