@@ -11,6 +11,7 @@ import { Brain, TrendingUp, TrendingDown, Target, BookOpen, Loader2, Sparkles, B
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import ReactMarkdown from "react-markdown";
 import type { SignalWithInstrument } from "@shared/schema";
+import { SignalJournal } from "@/components/signal-journal";
 
 export default function AdvisorPage() {
   const initialSignalId = (() => {
@@ -394,7 +395,7 @@ function TradeDeepDiveTab({ autoSignalId }: { autoSignalId?: number | null }) {
                 Deep Trade Analysis
               </CardTitle>
               {selectedSignal && (
-                <Link href={`/instruments/${selectedSignal.instrument.canonicalSymbol}`}>
+                <Link href={`/instruments/${selectedSignal.instrument.canonicalSymbol}?signalId=${selectedSignal.id}`}>
                   <Button variant="outline" size="sm" data-testid="button-view-on-chart">
                     <TrendingUp className="w-3.5 h-3.5 mr-1.5" /> View {selectedSignal.instrument.canonicalSymbol} on Chart
                   </Button>
@@ -402,10 +403,18 @@ function TradeDeepDiveTab({ autoSignalId }: { autoSignalId?: number | null }) {
               )}
             </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
             <div className="prose prose-sm dark:prose-invert max-w-none" data-testid="text-trade-analysis">
               <ReactMarkdown>{analysis}</ReactMarkdown>
             </div>
+            {selectedSignal && (
+              <SignalJournal
+                signalId={selectedSignal.id}
+                initialNotes={selectedSignal.notes}
+                initialConfidence={selectedSignal.confidence}
+                initialTags={selectedSignal.tags}
+              />
+            )}
           </CardContent>
         </Card>
       )}

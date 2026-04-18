@@ -8,11 +8,16 @@ import { Button } from "@/components/ui/button";
 import { Link } from "wouter";
 import type { Candle, Indicator, SignalWithInstrument, Instrument } from "@shared/schema";
 import { DeepDiveButton } from "@/components/signal-journal";
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useMemo } from "react";
 
 export default function SymbolView() {
   const params = useParams<{ symbol: string }>();
   const symbol = params.symbol;
+  const focusSignalId = useMemo(() => {
+    if (typeof window === "undefined") return null;
+    const sid = new URLSearchParams(window.location.search).get("signalId");
+    return sid ? parseInt(sid) : null;
+  }, []);
 
   const { data: instrument, isLoading: instLoading } = useQuery<Instrument>({
     queryKey: ["/api/instruments", symbol],
@@ -185,6 +190,36 @@ function CandleChart({ candles, indicators }: { candles: Candle[]; indicators?: 
         }))
       );
 
+      const focusSig = focusSignalId && signals ? signals.find((s) => s.id === focusSignalId) : undefined;
+      if (focusSig) {
+        const focusTime = Math.floor(new Date(focusSig.candleDatetimeUtc).getTime() / 1000);
+        try {
+          const { createSeriesMarkers } = await import("lightweight-charts");
+          createSeriesMarkers(candleSeries, [{
+            time: focusTime as any,
+            position: focusSig.direction === "LONG" ? "belowBar" : "aboveBar",
+            color: focusSig.direction === "LONG" ? "#22c55e" : "#ef4444",
+            shape: focusSig.direction === "LONG" ? "arrowUp" : "arrowDown",
+            text: `Signal #${focusSig.id}`,
+          }]);
+        } catch {
+          // marker API not available — skip silently
+        }
+        chart.timeScale().scrollToPosition(0, false);
+        setTimeout(() => {
+          try {
+            const idx = sorted.findIndex(
+              (c) => Math.floor(new Date(c.datetimeUtc).getTime() / 1000) === focusTime,
+            );
+            if (idx >= 0) {
+              const from = Math.max(0, idx - 30);
+              const to = Math.min(sorted.length - 1, idx + 10);
+              chart.timeScale().setVisibleLogicalRange({ from, to });
+            }
+          } catch {}
+        }, 50);
+      }
+
       if (indicators?.length) {
         const sortedInd = [...indicators].sort(
           (a, b) => new Date(a.datetimeUtc).getTime() - new Date(b.datetimeUtc).getTime()
@@ -267,7 +302,7 @@ function CandleChart({ candles, indicators }: { candles: Candle[]; indicators?: 
         chart.remove();
       }
     };
-  }, [candles, indicators]);
+  }, [candles, indicators, signals, focusSignalId]);
 
   return <div ref={containerRef} className="w-full" data-testid="chart-container" />;
 }

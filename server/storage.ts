@@ -321,7 +321,13 @@ export class DatabaseStorage implements IStorage {
       .values(data)
       .onConflictDoUpdate({
         target: [signals.instrumentId, signals.timeframe, signals.strategy, signals.direction, signals.candleDatetimeUtc],
-        set: { score: data.score, reasonJson: data.reasonJson, detectedAt: new Date() },
+        set: {
+          score: data.score,
+          reasonJson: data.reasonJson,
+          detectedAt: new Date(),
+          paramSetVersion: data.paramSetVersion,
+          summaryText: data.summaryText,
+        },
       })
       .returning();
     return row;
