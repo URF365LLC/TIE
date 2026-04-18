@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
-import { Loader2, History, Sparkles, Archive, EyeOff, CheckCircle2 } from "lucide-react";
+import { Loader2, History, Sparkles, Archive, EyeOff, CheckCircle2, TrendingUp } from "lucide-react";
 import type { StrategyParameters, StrategyParamsConfig } from "@shared/schema";
 
 interface HistoryRow extends StrategyParameters {
@@ -24,6 +24,39 @@ interface RollingRow {
   winRate: number | null;
 }
 
+interface PromotionRecommendation {
+  paramSetId: number;
+  version: number;
+  name: string;
+  comparison: {
+    windowDays: number;
+    activeVersion: number | null;
+    activeName: string | null;
+    activeWins: number;
+    activeLosses: number;
+    activeTotal: number;
+    activeWinRate: number | null;
+    shadowWins: number;
+    shadowLosses: number;
+    shadowTotal: number;
+    shadowWinRate: number;
+    deltaPp: number;
+    zScore: number;
+    pValue: number;
+    minSampleSize: number;
+    minDeltaPp: number;
+    maxPValue: number;
+  };
+  summary: string;
+}
+
+interface PromotionRecommendationsResponse {
+  windowDays: number;
+  thresholds: { minSampleSize: number; minDeltaPp: number; maxPValue: number };
+  active: { paramSetId: number; version: number; name: string; total: number; winRate: number | null } | null;
+  recommendations: PromotionRecommendation[];
+}
+
 export default function ParameterHistoryPage() {
   const { toast } = useToast();
   const [windowDays, setWindowDays] = useState(30);
@@ -35,6 +68,13 @@ export default function ParameterHistoryPage() {
     queryKey: ["/api/strategy-parameters/rolling-winrate", windowDays],
     queryFn: async () => {
       const res = await fetch(`/api/strategy-parameters/rolling-winrate?days=${windowDays}`);
+      return res.json();
+    },
+  });
+  const { data: recommendations } = useQuery<PromotionRecommendationsResponse>({
+    queryKey: ["/api/strategy-parameters/promotion-recommendations", windowDays],
+    queryFn: async () => {
+      const res = await fetch(`/api/strategy-parameters/promotion-recommendations?days=${windowDays}`);
       return res.json();
     },
   });
@@ -68,13 +108,15 @@ export default function ParameterHistoryPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/strategy-parameters/history"] });
       queryClient.invalidateQueries({ queryKey: ["/api/strategy-parameters"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/strategy-parameters/rolling-winrate", windowDays] });
+      queryClient.invalidateQueries({ queryKey: ["/api/strategy-parameters/promotion-recommendations", windowDays] });
     },
     onError: (err: any) => toast({ title: "Update failed", description: err.message, variant: "destructive" }),
   });
 
   const activateMutation = useMutation({
-    mutationFn: async (id: number) => {
-      const res = await apiRequest("POST", `/api/strategy-parameters/${id}/activate`);
+    mutationFn: async (args: { id: number; rationale?: any }) => {
+      const res = await apiRequest("POST", `/api/strategy-parameters/${args.id}/activate`, args.rationale ? { rationale: args.rationale } : {});
       return await res.json();
     },
     onSuccess: (row: any) => {
@@ -82,6 +124,7 @@ export default function ParameterHistoryPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/strategy-parameters/history"] });
       queryClient.invalidateQueries({ queryKey: ["/api/strategy-parameters"] });
       queryClient.invalidateQueries({ queryKey: ["/api/strategy-parameters/rolling-winrate", windowDays] });
+      queryClient.invalidateQueries({ queryKey: ["/api/strategy-parameters/promotion-recommendations", windowDays] });
     },
   });
 
@@ -102,6 +145,58 @@ export default function ParameterHistoryPage() {
           </Button>
         </div>
       </div>
+
+      {recommendations && recommendations.recommendations.length > 0 && (
+        <Card className="border-status-online/40 bg-status-online/5" data-testid="card-promotion-recommendations">
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <TrendingUp className="w-4 h-4 text-status-online" />
+              Recommended promotions ({windowDays}d window)
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {recommendations.recommendations.map((rec) => (
+              <div
+                key={rec.paramSetId}
+                className="flex items-start justify-between gap-4 rounded-md border bg-background p-3"
+                data-testid={`row-recommendation-${rec.paramSetId}`}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Badge variant="default" data-testid={`badge-rec-version-${rec.paramSetId}`}>v{rec.version}</Badge>
+                    <span className="font-medium truncate">{rec.name}</span>
+                    <Badge variant="outline" data-testid={`badge-rec-delta-${rec.paramSetId}`}>
+                      +{rec.comparison.deltaPp.toFixed(1)}pp
+                    </Badge>
+                    <Badge variant="secondary" data-testid={`badge-rec-pvalue-${rec.paramSetId}`}>
+                      p={rec.comparison.pValue.toFixed(3)}
+                    </Badge>
+                  </div>
+                  <p className="text-sm text-muted-foreground" data-testid={`text-rec-summary-${rec.paramSetId}`}>{rec.summary}</p>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    Shadow: {rec.comparison.shadowWins}W / {rec.comparison.shadowLosses}L ({rec.comparison.shadowTotal} resolved) ·
+                    Active v{rec.comparison.activeVersion}: {rec.comparison.activeWins}W / {rec.comparison.activeLosses}L ({rec.comparison.activeTotal} resolved)
+                  </div>
+                </div>
+                <ConfirmAutoPromote
+                  recommendation={rec}
+                  onConfirm={() =>
+                    activateMutation.mutate({
+                      id: rec.paramSetId,
+                      rationale: {
+                        source: "auto-promotion-recommendation",
+                        promotedAt: new Date().toISOString(),
+                        summary: rec.summary,
+                        comparison: rec.comparison,
+                      },
+                    })
+                  }
+                />
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
@@ -193,7 +288,7 @@ export default function ParameterHistoryPage() {
                           </Button>
                         )}
                         {!p.isActive && (
-                          <ConfirmActivate onConfirm={() => activateMutation.mutate(p.id)} version={p.version} />
+                          <ConfirmActivate onConfirm={() => activateMutation.mutate({ id: p.id })} version={p.version} />
                         )}
                         {!p.isActive && p.status !== "archived" && (
                           <Button size="sm" variant="ghost" onClick={() => statusMutation.mutate({ id: p.id, status: "archived" })} data-testid={`button-archive-${p.id}`}>
@@ -218,6 +313,41 @@ function StatusBadge({ status, isActive }: { status: string; isActive?: boolean 
   const variant: "default" | "secondary" | "outline" | "destructive" =
     status === "draft" ? "outline" : status === "active" ? "default" : "secondary";
   return <Badge variant={variant}>{status}</Badge>;
+}
+
+function ConfirmAutoPromote({ recommendation, onConfirm }: { recommendation: PromotionRecommendation; onConfirm: () => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <AlertDialog open={open} onOpenChange={setOpen}>
+      <AlertDialogTrigger asChild>
+        <Button size="sm" data-testid={`button-auto-promote-${recommendation.paramSetId}`}>
+          <CheckCircle2 className="w-3 h-3 mr-1" /> Promote
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Promote v{recommendation.version} to active?</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-2">
+              <p>{recommendation.summary}</p>
+              <p className="text-xs text-muted-foreground">
+                The currently-active set will be demoted to shadow. The comparison summary above is attached to this version's rationale and will appear in the version history.
+              </p>
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel data-testid={`button-cancel-auto-promote-${recommendation.paramSetId}`}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => { onConfirm(); setOpen(false); }}
+            data-testid={`button-confirm-auto-promote-${recommendation.paramSetId}`}
+          >
+            Promote
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
 }
 
 function ConfirmActivate({ onConfirm, version }: { onConfirm: () => void; version: number }) {

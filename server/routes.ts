@@ -349,8 +349,13 @@ export async function registerRoutes(
   app.post("/api/strategy-parameters/:id/activate", async (req, res) => {
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "invalid id" });
+    const rationaleSchema = z.object({ rationale: z.unknown().optional() }).strict();
+    const parsed = rationaleSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid payload", errors: parsed.error.flatten() });
+    }
     try {
-      const row = await storage.setActiveStrategyParameters(id);
+      const row = await storage.setActiveStrategyParameters(id, parsed.data.rationale);
       res.json(row);
     } catch (err: any) {
       res.status(500).json({ message: err.message });
@@ -586,5 +591,121 @@ export async function registerRoutes(
     res.json({ windowDays: days, rows });
   });
 
+  // Auto-promotion recommendations: for each shadow set with a statistically
+  // meaningful win-rate edge over the active set in the rolling window, return
+  // a structured recommendation the user can promote with one click.
+  app.get("/api/strategy-parameters/promotion-recommendations", async (req, res) => {
+    const days = Math.max(1, Math.min(365, parseInt(String(req.query.days ?? "30")) || 30));
+    const minSampleSize = Math.max(5, parseInt(String(req.query.minSamples ?? "20")) || 20);
+    const minDeltaPp = Math.max(0, parseFloat(String(req.query.minDeltaPp ?? "5")) || 5);
+    const maxPValue = Math.max(0.0001, Math.min(0.5, parseFloat(String(req.query.maxP ?? "0.05")) || 0.05));
+
+    try {
+      const rows = await storage.getRollingWinRateByParamSet(days);
+      const active = rows.find((r) => r.status === "active");
+      const recommendations = [] as Array<{
+        paramSetId: number;
+        version: number;
+        name: string;
+        comparison: {
+          windowDays: number;
+          activeVersion: number | null;
+          activeName: string | null;
+          activeWins: number;
+          activeLosses: number;
+          activeTotal: number;
+          activeWinRate: number | null;
+          shadowWins: number;
+          shadowLosses: number;
+          shadowTotal: number;
+          shadowWinRate: number;
+          deltaPp: number;
+          zScore: number;
+          pValue: number;
+          minSampleSize: number;
+          minDeltaPp: number;
+          maxPValue: number;
+        };
+        summary: string;
+      }>;
+
+      if (active && active.total >= minSampleSize) {
+        for (const r of rows) {
+          if (r.paramSetId === active.paramSetId) continue;
+          if (r.status !== "shadow") continue;
+          if (r.total < minSampleSize) continue;
+          if (r.winRate == null || active.winRate == null) continue;
+          const deltaPp = r.winRate - active.winRate;
+          if (deltaPp < minDeltaPp) continue;
+          const z = twoProportionZ(r.wins, r.total, active.wins, active.total);
+          if (!Number.isFinite(z) || z <= 0) continue;
+          const pValue = 1 - normCdf(z);
+          if (pValue > maxPValue) continue;
+          const summary = `v${r.version} (${r.name}) shadow win rate ${r.winRate.toFixed(1)}% beats active v${active.version} ${active.winRate.toFixed(1)}% by ${deltaPp.toFixed(1)}pp over ${r.total} resolved signals (vs ${active.total}) in the last ${days}d (p=${pValue.toFixed(3)}).`;
+          recommendations.push({
+            paramSetId: r.paramSetId,
+            version: r.version,
+            name: r.name,
+            comparison: {
+              windowDays: days,
+              activeVersion: active.version,
+              activeName: active.name,
+              activeWins: active.wins,
+              activeLosses: active.losses,
+              activeTotal: active.total,
+              activeWinRate: active.winRate,
+              shadowWins: r.wins,
+              shadowLosses: r.losses,
+              shadowTotal: r.total,
+              shadowWinRate: r.winRate,
+              deltaPp,
+              zScore: z,
+              pValue,
+              minSampleSize,
+              minDeltaPp,
+              maxPValue,
+            },
+            summary,
+          });
+        }
+        recommendations.sort((a, b) => b.comparison.deltaPp - a.comparison.deltaPp);
+      }
+
+      res.json({
+        windowDays: days,
+        thresholds: { minSampleSize, minDeltaPp, maxPValue },
+        active: active
+          ? { paramSetId: active.paramSetId, version: active.version, name: active.name, total: active.total, winRate: active.winRate }
+          : null,
+        recommendations,
+      });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
   return httpServer;
+}
+
+// One-sided two-proportion z-test (pooled variance) comparing shadow vs active.
+// Positive z means the shadow set outperforms.
+function twoProportionZ(winsA: number, totalA: number, winsB: number, totalB: number): number {
+  if (totalA <= 0 || totalB <= 0) return NaN;
+  const pA = winsA / totalA;
+  const pB = winsB / totalB;
+  const pPool = (winsA + winsB) / (totalA + totalB);
+  const se = Math.sqrt(pPool * (1 - pPool) * (1 / totalA + 1 / totalB));
+  if (se === 0) return NaN;
+  return (pA - pB) / se;
+}
+
+// Standard normal CDF via Abramowitz & Stegun 26.2.17.
+function normCdf(z: number): number {
+  const sign = z < 0 ? -1 : 1;
+  const x = Math.abs(z);
+  const t = 1 / (1 + 0.2316419 * x);
+  const d = 0.3989422804014327 * Math.exp(-(x * x) / 2);
+  const poly = t * (0.31938153 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  const tail = d * poly;
+  return 0.5 + sign * (0.5 - tail);
 }

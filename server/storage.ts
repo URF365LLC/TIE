@@ -77,7 +77,7 @@ export interface IStorage {
   getActiveStrategyParameters(): Promise<StrategyParameters>;
   listStrategyParameters(): Promise<StrategyParameters[]>;
   createStrategyParameters(data: InsertStrategyParameters): Promise<StrategyParameters>;
-  setActiveStrategyParameters(id: number): Promise<StrategyParameters>;
+  setActiveStrategyParameters(id: number, rationale?: any): Promise<StrategyParameters>;
   ensureDefaultStrategyParameters(): Promise<StrategyParameters>;
   // Self-improvement loop additions:
   getActiveAndShadowStrategyParameters(): Promise<StrategyParameters[]>;
@@ -421,7 +421,7 @@ export class DatabaseStorage implements IStorage {
     return row;
   }
 
-  async setActiveStrategyParameters(id: number): Promise<StrategyParameters> {
+  async setActiveStrategyParameters(id: number, rationale?: any): Promise<StrategyParameters> {
     return await db.transaction(async (tx) => {
       // Demote the previously-active row (if any) to "shadow" so it keeps producing
       // shadow signals for direct head-to-head comparison with the new active set.
@@ -430,9 +430,16 @@ export class DatabaseStorage implements IStorage {
         .update(strategyParameters)
         .set({ isActive: false, status: "shadow", archivedAt: null })
         .where(eq(strategyParameters.isActive, true));
+      const patch: Partial<typeof strategyParameters.$inferInsert> = {
+        isActive: true,
+        status: "active",
+        activatedAt: new Date(),
+        archivedAt: null,
+      };
+      if (rationale !== undefined) patch.rationale = rationale;
       const [row] = await tx
         .update(strategyParameters)
-        .set({ isActive: true, status: "active", activatedAt: new Date(), archivedAt: null })
+        .set(patch)
         .where(eq(strategyParameters.id, id))
         .returning();
       if (!row) throw new Error(`strategy_parameters id ${id} not found`);
