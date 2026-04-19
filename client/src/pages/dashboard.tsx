@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -8,6 +8,7 @@ import { Activity, Zap, BarChart3, Clock, Play, Pause, TrendingUp, TrendingDown,
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Link } from "wouter";
+import { formatDistanceToNow } from "date-fns";
 import type { SignalWithInstrument, ScanRun } from "@shared/schema";
 import { DeepDiveButton, SummaryLine } from "@/components/signal-journal";
 
@@ -20,6 +21,9 @@ interface PromotionNotificationRow {
   emailStatus: string;
   emailedAt: string | null;
   createdAt: string;
+  reminderCount: number;
+  lastReminderAt: string | null;
+  maxReminders: number;
 }
 
 export default function Dashboard() {
@@ -51,6 +55,14 @@ export default function Dashboard() {
     queryKey: ["/api/strategy-parameters/promotion-notifications"],
     refetchInterval: 30000,
   });
+
+  // Force a re-render every 30s so the "X ago" relative time stays fresh
+  // even when the polled query data hasn't changed.
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setNowTick((n) => n + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
 
   const dismissPromotion = useMutation({
     mutationFn: async (id: number) => {
@@ -162,6 +174,15 @@ export default function Dashboard() {
                   <p className="text-xs text-muted-foreground mt-1" data-testid={`text-promotion-summary-${notif.id}`}>
                     {notif.summary}
                   </p>
+                  {notif.reminderCount > 0 && notif.lastReminderAt && (
+                    <p
+                      className="text-xs text-muted-foreground mt-1"
+                      data-testid={`text-promotion-reminder-${notif.id}`}
+                    >
+                      Reminder {notif.reminderCount}/{notif.maxReminders} sent{" "}
+                      {formatDistanceToNow(new Date(notif.lastReminderAt), { addSuffix: true })}
+                    </p>
+                  )}
                   <div className="flex items-center gap-2 mt-3">
                     <Link href="/parameters">
                       <Button size="sm" data-testid={`button-promotion-review-${notif.id}`}>

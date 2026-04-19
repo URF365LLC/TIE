@@ -624,8 +624,12 @@ export async function registerRoutes(
   // disappears automatically once the user promotes the set.
   app.get("/api/strategy-parameters/promotion-notifications", async (_req, res) => {
     try {
-      const rows = await storage.listActivePromotionNotifications();
-      res.json(rows);
+      const [rows, settings] = await Promise.all([
+        storage.listActivePromotionNotifications(),
+        storage.getSettings(),
+      ]);
+      const maxReminders = Math.max(0, settings.promotionMaxReminders ?? 3);
+      res.json(rows.map((r) => ({ ...r, maxReminders })));
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
