@@ -57,6 +57,7 @@ Analysis-only trading intelligence platform that scans markets using Twelve Data
 - `POST /api/advisor/strategy-optimizer` - AI strategy optimizer recommendations
 - `PATCH /api/signals/:id/journal` - Update notes/confidence/tags
 - `POST /api/signals/backfill-summaries` - Generate summaryText for legacy signals (max 1000 at a time)
+- `POST /api/admin/reclassify-missed` - Re-walk MISSED signals' post-detection candles in a configurable window (default 24h, max 720h) and flip outcome to WIN/LOSS if SL/TP touched (admin-token protected)
 - `GET /api/strategy-parameters` - List versioned strategy parameter sets
 - `POST /api/strategy-parameters` - Create new parameter set (body: { name, description?, params, activate? })
 - `POST /api/strategy-parameters/:id/activate` - Activate a parameter set

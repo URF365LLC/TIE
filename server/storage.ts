@@ -76,6 +76,7 @@ export interface IStorage {
   updateSignalStatus(id: number, status: string): Promise<void>;
   markSignalAction(id: number, status: string): Promise<void>;
   resolveSignal(id: number, status: string, outcome: string, outcomePrice: number | null): Promise<void>;
+  getMissedSignals(): Promise<Signal[]>;
   updateSignalJournal(id: number, data: { notes?: string | null; confidence?: number | null; tags?: string[] | null }): Promise<Signal | undefined>;
   updateSignalSummary(id: number, summaryText: string): Promise<void>;
 
@@ -400,6 +401,14 @@ export class DatabaseStorage implements IStorage {
         resolvedAt: new Date(),
       })
       .where(eq(signals.id, id));
+  }
+
+  async getMissedSignals(): Promise<Signal[]> {
+    return db
+      .select()
+      .from(signals)
+      .where(eq(signals.outcome, "MISSED"))
+      .orderBy(desc(signals.detectedAt));
   }
 
   async updateSignalJournal(

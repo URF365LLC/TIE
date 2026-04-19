@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { runScanCycle } from "./scanner";
+import { runScanCycle, reclassifyMissedSignals } from "./scanner";
 import { WHITELIST, canonicalToVendor } from "@shared/schema";
 import { log } from "./logger";
 import { z } from "zod";
@@ -687,6 +687,28 @@ export async function registerRoutes(
     if (headerToken === adminToken || bearer === adminToken) return next();
     return res.status(401).json({ message: "admin token required" });
   };
+
+  const reclassifySchema = z.object({
+    windowHours: z.number().int().min(1).max(720).optional(),
+  });
+
+  app.post("/api/admin/reclassify-missed", requireAdmin, async (req, res) => {
+    const parsed = reclassifySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid payload", errors: parsed.error.flatten() });
+    }
+    try {
+      const report = await reclassifyMissedSignals({ windowHours: parsed.data.windowHours });
+      log(
+        `Reclassify MISSED: scanned=${report.scanned} → win=${report.flippedToWin} loss=${report.flippedToLoss} stillMissed=${report.stillMissed} (window=${report.windowHours}h)`,
+        "reclassify",
+      );
+      res.json(report);
+    } catch (err: any) {
+      log(`Reclassify error: ${err?.message ?? err}`, "reclassify");
+      res.status(500).json({ message: err?.message ?? "reclassify failed" });
+    }
+  });
 
   app.post("/api/admin/backfill", requireAdmin, async (req, res) => {
     const parsed = backfillSchema.safeParse(req.body);

@@ -1,14 +1,30 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { TrendingUp, TrendingDown, Trophy, XCircle, HelpCircle, Filter, X, BarChart3, Target, Percent, Scale, ChevronDown, ChevronUp } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
+import { TrendingUp, TrendingDown, Trophy, XCircle, HelpCircle, Filter, X, BarChart3, Target, Percent, Scale, ChevronDown, ChevronUp, RefreshCcw } from "lucide-react";
 import { Link } from "wouter";
 import type { SignalWithInstrument, Settings } from "@shared/schema";
 import { SignalJournal, SummaryLine, DeepDiveButton } from "@/components/signal-journal";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
+
+interface ReclassifyReport {
+  scanned: number;
+  flippedToWin: number;
+  flippedToLoss: number;
+  stillMissed: number;
+  skippedNoLevels: number;
+  skippedNoCandles: number;
+  windowHours: number;
+  byStrategy: Record<string, { scanned: number; flippedToWin: number; flippedToLoss: number; stillMissed: number }>;
+}
 
 interface BacktestStats {
   total: number;
@@ -56,9 +72,12 @@ export default function BacktestPage() {
 
   return (
     <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight" data-testid="text-backtest-title">Backtest</h1>
-        <p className="text-sm text-muted-foreground mt-1">Strategy performance analysis on archived signals</p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight" data-testid="text-backtest-title">Backtest</h1>
+          <p className="text-sm text-muted-foreground mt-1">Strategy performance analysis on archived signals</p>
+        </div>
+        <ReclassifyMissedDialog missedCount={stats?.missed ?? 0} />
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -382,5 +401,143 @@ function ScoreBadge({ score }: { score: number }) {
     <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${color}`}>
       {score}
     </span>
+  );
+}
+
+function ReclassifyMissedDialog({ missedCount }: { missedCount: number }) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const [windowHours, setWindowHours] = useState(24);
+  const [adminToken, setAdminToken] = useState<string>(
+    typeof window !== "undefined" ? localStorage.getItem("backfillAdminToken") ?? "" : "",
+  );
+  const [report, setReport] = useState<ReclassifyReport | null>(null);
+
+  const mutation = useMutation({
+    mutationFn: async (hours: number): Promise<ReclassifyReport> => {
+      if (typeof window !== "undefined" && adminToken.trim()) {
+        localStorage.setItem("backfillAdminToken", adminToken.trim());
+      }
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (adminToken.trim()) headers["x-admin-token"] = adminToken.trim();
+      const res = await fetch("/api/admin/reclassify-missed", {
+        method: "POST",
+        headers,
+        credentials: "include",
+        body: JSON.stringify({ windowHours: hours }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => res.statusText);
+        throw new Error(`${res.status}: ${text || res.statusText}`);
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setReport(data);
+      queryClient.invalidateQueries({ queryKey: ["/api/backtest/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/backtest/signals"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/stats"] });
+      toast({
+        title: "Reclassification complete",
+        description: `Flipped ${data.flippedToWin} → WIN, ${data.flippedToLoss} → LOSS, ${data.stillMissed} still MISSED.`,
+      });
+    },
+    onError: (err: any) => {
+      toast({
+        title: "Reclassify failed",
+        description: err?.message ?? "Unknown error",
+        variant: "destructive",
+      });
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) setReport(null); }}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm" data-testid="button-open-reclassify-missed">
+          <RefreshCcw className="w-4 h-4 mr-2" />
+          Reclassify MISSED ({missedCount})
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-lg" data-testid="dialog-reclassify-missed">
+        <DialogHeader>
+          <DialogTitle>Reclassify MISSED Signals</DialogTitle>
+          <DialogDescription>
+            Walks each MISSED signal's post-detection candles within the chosen window and
+            checks whether TP or SL was actually touched. Outcomes flip to WIN/LOSS when found.
+            Useful after a candle backfill.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          <div className="space-y-2">
+            <Label htmlFor="reclassify-window">Window (hours)</Label>
+            <Input
+              id="reclassify-window"
+              type="number"
+              min={1}
+              max={720}
+              value={windowHours}
+              onChange={(e) => setWindowHours(Math.max(1, Math.min(720, parseInt(e.target.value) || 1)))}
+              data-testid="input-reclassify-window"
+            />
+            <p className="text-xs text-muted-foreground">
+              How far past each signal's detection time to walk for TP/SL touches. Range 1–720.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="reclassify-admin-token">Admin Token (if required)</Label>
+            <Input
+              id="reclassify-admin-token"
+              type="password"
+              placeholder="x-admin-token header value"
+              value={adminToken}
+              onChange={(e) => setAdminToken(e.target.value)}
+              data-testid="input-reclassify-admin-token"
+            />
+            <p className="text-xs text-muted-foreground">
+              Stored in your browser only. Leave blank if ADMIN_TOKEN is not set on the server.
+            </p>
+          </div>
+
+          {report && (
+            <div className="rounded-md border bg-muted/30 p-3 text-sm space-y-1" data-testid="text-reclassify-report">
+              <div className="flex justify-between"><span className="text-muted-foreground">Scanned</span><span className="font-mono">{report.scanned}</span></div>
+              <div className="flex justify-between"><span className="text-emerald-500">→ WIN</span><span className="font-mono">{report.flippedToWin}</span></div>
+              <div className="flex justify-between"><span className="text-red-500">→ LOSS</span><span className="font-mono">{report.flippedToLoss}</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">Still MISSED</span><span className="font-mono">{report.stillMissed}</span></div>
+              {report.skippedNoLevels > 0 && (
+                <div className="flex justify-between text-xs text-muted-foreground"><span>Skipped (no TP/SL)</span><span className="font-mono">{report.skippedNoLevels}</span></div>
+              )}
+              {report.skippedNoCandles > 0 && (
+                <div className="flex justify-between text-xs text-muted-foreground"><span>Skipped (no candles)</span><span className="font-mono">{report.skippedNoCandles}</span></div>
+              )}
+              {Object.keys(report.byStrategy).length > 0 && (
+                <div className="pt-2 mt-2 border-t space-y-1">
+                  {Object.entries(report.byStrategy).map(([strat, b]) => (
+                    <div key={strat} className="flex justify-between text-xs">
+                      <span className="text-muted-foreground">{strat.replace(/_/g, " ")}</span>
+                      <span className="font-mono">{b.flippedToWin}W / {b.flippedToLoss}L / {b.stillMissed}M</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => setOpen(false)} data-testid="button-reclassify-close">Close</Button>
+          <Button
+            onClick={() => mutation.mutate(windowHours)}
+            disabled={mutation.isPending || missedCount === 0}
+            data-testid="button-reclassify-run"
+          >
+            {mutation.isPending ? "Walking candles…" : "Run Reclassification"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

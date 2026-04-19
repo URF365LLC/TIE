@@ -551,3 +551,98 @@ async function determineOutcomeFromCandles(
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+export interface ReclassifyMissedReport {
+  scanned: number;
+  flippedToWin: number;
+  flippedToLoss: number;
+  stillMissed: number;
+  skippedNoLevels: number;
+  skippedNoCandles: number;
+  windowHours: number;
+  byStrategy: Record<string, { scanned: number; flippedToWin: number; flippedToLoss: number; stillMissed: number }>;
+}
+
+/**
+ * Re-walks every MISSED signal's post-detection candles within `windowHours` and
+ * checks whether TP or SL was actually touched. Flips outcome to WIN or LOSS when
+ * found; leaves it MISSED otherwise. Idempotent: re-running with a different
+ * window simply re-evaluates and may flip more rows.
+ */
+export async function reclassifyMissedSignals(opts: { windowHours?: number } = {}): Promise<ReclassifyMissedReport> {
+  const windowHours = Math.max(1, Math.min(720, opts.windowHours ?? 24));
+  const windowMs = windowHours * 60 * 60 * 1000;
+  const missed = await storage.getMissedSignals();
+
+  const report: ReclassifyMissedReport = {
+    scanned: missed.length,
+    flippedToWin: 0,
+    flippedToLoss: 0,
+    stillMissed: 0,
+    skippedNoLevels: 0,
+    skippedNoCandles: 0,
+    windowHours,
+    byStrategy: {},
+  };
+
+  // Cache candles per (instrumentId, timeframe, fromMs, toMs) — keep simple by
+  // bucketing per signal range. Most signals share instrument+timeframe but have
+  // different windows, so per-signal range fetch is the cleanest correct path.
+  for (const sig of missed) {
+    const reason = (sig.reasonJson ?? {}) as Record<string, any>;
+    const tpRaw = reason.takeProfit;
+    const slRaw = reason.stopLoss;
+    const stratBucket = (report.byStrategy[sig.strategy] ??= { scanned: 0, flippedToWin: 0, flippedToLoss: 0, stillMissed: 0 });
+    stratBucket.scanned++;
+
+    if (tpRaw == null || slRaw == null) {
+      report.skippedNoLevels++;
+      stratBucket.stillMissed++;
+      continue;
+    }
+
+    const tp = new Decimal(tpRaw);
+    const sl = new Decimal(slRaw);
+    const detected = new Date(sig.detectedAt);
+    const from = new Date(detected.getTime());
+    const to = new Date(detected.getTime() + windowMs);
+
+    const candles = await storage.getCandlesInRange(sig.instrumentId, sig.timeframe, from, to);
+    const relevant = candles
+      .filter((c) => c.datetimeUtc.getTime() > detected.getTime())
+      .sort((a, b) => a.datetimeUtc.getTime() - b.datetimeUtc.getTime());
+
+    if (relevant.length === 0) {
+      report.skippedNoCandles++;
+      stratBucket.stillMissed++;
+      continue;
+    }
+
+    let result: "WIN" | "LOSS" | null = null;
+    let price: number | null = null;
+    for (const c of relevant) {
+      const high = new Decimal(c.high);
+      const low = new Decimal(c.low);
+      if (sig.direction === "LONG") {
+        if (low.lte(sl)) { result = "LOSS"; price = sl.toNumber(); break; }
+        if (high.gte(tp)) { result = "WIN"; price = tp.toNumber(); break; }
+      } else {
+        if (high.gte(sl)) { result = "LOSS"; price = sl.toNumber(); break; }
+        if (low.lte(tp)) { result = "WIN"; price = tp.toNumber(); break; }
+      }
+    }
+
+    if (result === null) {
+      report.stillMissed++;
+      stratBucket.stillMissed++;
+      continue;
+    }
+
+    const newStatus = sig.status === "NEW" || sig.status === "ALERTED" ? "EXPIRED" : sig.status;
+    await storage.resolveSignal(sig.id, newStatus, result, price);
+    if (result === "WIN") { report.flippedToWin++; stratBucket.flippedToWin++; }
+    else { report.flippedToLoss++; stratBucket.flippedToLoss++; }
+  }
+
+  return report;
+}
