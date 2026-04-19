@@ -17,6 +17,7 @@ import AdvisorPage from "@/pages/advisor";
 import PerformancePage from "@/pages/performance";
 import SimulatorPage from "@/pages/simulator";
 import ParameterHistoryPage from "@/pages/parameter-history";
+import BackfillPage from "@/pages/backfill";
 
 function Router() {
   return (
@@ -30,6 +31,7 @@ function Router() {
       <Route path="/advisor" component={AdvisorPage} />
       <Route path="/instruments" component={InstrumentsPage} />
       <Route path="/instruments/:symbol" component={SymbolView} />
+      <Route path="/backfill" component={BackfillPage} />
       <Route path="/settings" component={SettingsPage} />
       <Route component={NotFound} />
     </Switch>
