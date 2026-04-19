@@ -8,6 +8,7 @@ import { sendSignalAlert } from "./alerter";
 import { evaluatePromotionsAndNotify } from "./promotion";
 import { log } from "./logger";
 import { summarizeSignal } from "./summary";
+import { computeRegime } from "./regime";
 import type { Instrument, InsertCandle, InsertIndicator, Candle, Indicator, Signal, StrategyParamsConfig } from "@shared/schema";
 
 let scannerTimeout: NodeJS.Timeout | null = null;
@@ -365,6 +366,12 @@ async function processInstrument(
     return { signalCount: 0, skippedFresh: false, rejections: [{ strategy: "ALL", reason: "missing_indicators" }] };
   }
 
+  // Regime snapshot at the moment of detection — shared by every live and
+  // shadow signal produced from this bar. Computed once from 15m indicators
+  // (ADX + BB-width percentile over the most recent 50 rows).
+  const latestEntryInd = entryIndicators.find((i) => i.datetimeUtc.getTime() === latestClosedEntry.datetimeUtc.getTime());
+  const regime = computeRegime(latestEntryInd, entryIndicators.slice(0, 50));
+
   // === Live evaluation against the active parameter set ===
   const stratResults = evaluateStrategies({
     instrumentId: inst.id,
@@ -403,6 +410,8 @@ async function processInstrument(
       paramSetId: activeParams.id,
       mode: "live",
       summaryText,
+      regimeTag: regime?.tag ?? null,
+      regimeContext: regime?.context ?? null,
     });
 
     signalCount++;
@@ -442,6 +451,8 @@ async function processInstrument(
         paramSetId: shadow.id,
         mode: "shadow",
         summaryText,
+        regimeTag: regime?.tag ?? null,
+        regimeContext: regime?.context ?? null,
       });
     }
   }
@@ -474,7 +485,7 @@ export async function resolveSignalOutcome(signalId: number, newStatus: string):
   const reason = (sig.reasonJson ?? {}) as Record<string, any>;
   const outcome = await determineOutcomeFromCandles(sig, reason);
   if (outcome.result === "WIN" || outcome.result === "LOSS") {
-    await storage.resolveSignal(signalId, newStatus, outcome.result, outcome.price);
+    await storage.resolveSignal(signalId, newStatus, outcome.result, outcome.price, metricsFrom(sig, outcome));
   } else {
     // Not yet resolved by price — only record the user's decision, leave outcome NULL
     // so resolveActiveSignals can finalize it on a future tick.
@@ -492,7 +503,7 @@ export async function resolveActiveSignals(candleCache?: Map<string, Candle[]>):
     if (outcome.result === "WIN" || outcome.result === "LOSS") {
       // Preserve the user's decision (TAKEN/NOT_TAKEN); only auto-promote NEW/ALERTED → EXPIRED.
       const newStatus = sig.status === "NEW" || sig.status === "ALERTED" ? "EXPIRED" : sig.status;
-      await storage.resolveSignal(sig.id, newStatus, outcome.result, outcome.price);
+      await storage.resolveSignal(sig.id, newStatus, outcome.result, outcome.price, metricsFrom(sig, outcome));
       resolved++;
     }
   }
@@ -508,21 +519,84 @@ export async function expireOldSignals(evalWindowMs?: number, candleCache?: Map<
     const outcome = await determineOutcomeFromCandles(sig, reason, candleCache);
     const finalOutcome = outcome.result === "WIN" || outcome.result === "LOSS" ? outcome.result : "MISSED";
     const newStatus = sig.status === "NEW" || sig.status === "ALERTED" ? "EXPIRED" : sig.status;
-    await storage.resolveSignal(sig.id, newStatus, finalOutcome, outcome.price);
+    await storage.resolveSignal(sig.id, newStatus, finalOutcome, outcome.price, metricsFrom(sig, outcome));
     count++;
   }
   return count;
 }
 
+export interface ResolutionMetrics {
+  mfe: number | null;
+  mae: number | null;
+  mfeR: number | null;
+  maeR: number | null;
+  timeToResolutionMs: number | null;
+}
+
+export interface OutcomeResult {
+  result: string;
+  price: number | null;
+  /** Peak favorable price reached in the walk (in price units). */
+  mfePrice: number | null;
+  /** Peak adverse price reached in the walk (in price units). */
+  maePrice: number | null;
+  /** Timestamp of the candle that resolved the signal (TP/SL hit). Null if MISSED. */
+  resolvedAtMs: number | null;
+}
+
+// Derive the persisted metrics object from a signal + the outcome walk.
+// Kept here (not in storage) because the math only makes sense with the
+// signal's entry price and stop distance.
+function metricsFrom(
+  sig: { direction: string; detectedAt: Date | string; reasonJson?: unknown },
+  outcome: OutcomeResult,
+): ResolutionMetrics {
+  const reason = (sig.reasonJson ?? {}) as Record<string, any>;
+  const entry = reason.entryPrice != null ? Number(reason.entryPrice) : null;
+  const stop = reason.stopLoss != null ? Number(reason.stopLoss) : null;
+  const risk = entry != null && stop != null ? Math.abs(entry - stop) : null;
+
+  let mfe: number | null = null;
+  let mae: number | null = null;
+  if (entry != null && outcome.mfePrice != null && outcome.maePrice != null) {
+    if (sig.direction === "LONG") {
+      mfe = outcome.mfePrice - entry;
+      mae = outcome.maePrice - entry;
+    } else {
+      mfe = entry - outcome.maePrice;
+      mae = entry - outcome.mfePrice;
+    }
+  }
+
+  const mfeR = mfe != null && risk && risk > 0 ? mfe / risk : null;
+  const maeR = mae != null && risk && risk > 0 ? mae / risk : null;
+
+  const detectedMs = new Date(sig.detectedAt).getTime();
+  const timeToResolutionMs = outcome.resolvedAtMs != null ? outcome.resolvedAtMs - detectedMs : null;
+
+  return {
+    mfe: mfe != null ? round6(mfe) : null,
+    mae: mae != null ? round6(mae) : null,
+    mfeR: mfeR != null ? round4(mfeR) : null,
+    maeR: maeR != null ? round4(maeR) : null,
+    timeToResolutionMs,
+  };
+}
+
+function round6(n: number): number { return Math.round(n * 1e6) / 1e6; }
+function round4(n: number): number { return Math.round(n * 1e4) / 1e4; }
+
 async function determineOutcomeFromCandles(
   sig: { instrumentId: number; direction: string; detectedAt: Date | string; timeframe: string },
   reason: Record<string, any>,
   candleCache?: Map<string, Candle[]>
-): Promise<{ result: string; price: number | null }> {
+): Promise<OutcomeResult> {
   const tpRaw = reason.takeProfit;
   const slRaw = reason.stopLoss;
   const entryRaw = reason.entryPrice;
-  if (tpRaw == null || slRaw == null || entryRaw == null) return { result: "MISSED", price: null };
+  if (tpRaw == null || slRaw == null || entryRaw == null) {
+    return { result: "MISSED", price: null, mfePrice: null, maePrice: null, resolvedAtMs: null };
+  }
 
   const tp = new Decimal(tpRaw);
   const sl = new Decimal(slRaw);
@@ -533,19 +607,39 @@ async function determineOutcomeFromCandles(
     .filter((c) => c.datetimeUtc.getTime() > detectedMs)
     .sort((a, b) => a.datetimeUtc.getTime() - b.datetimeUtc.getTime());
 
+  // Track the most favorable and most adverse prices touched along the walk.
+  // These are direction-agnostic extremes (max high / min low); metricsFrom()
+  // flips them per direction when converting to MFE/MAE.
+  let mfePrice: number | null = null;
+  let maePrice: number | null = null;
+
+  const updateExtremes = (highN: number, lowN: number) => {
+    if (sig.direction === "LONG") {
+      mfePrice = mfePrice == null ? highN : Math.max(mfePrice, highN);
+      maePrice = maePrice == null ? lowN : Math.min(maePrice, lowN);
+    } else {
+      mfePrice = mfePrice == null ? lowN : Math.min(mfePrice, lowN);
+      maePrice = maePrice == null ? highN : Math.max(maePrice, highN);
+    }
+  };
+
   for (const c of relevant) {
     const high = new Decimal(c.high);
     const low = new Decimal(c.low);
+    const highN = high.toNumber();
+    const lowN = low.toNumber();
+    updateExtremes(highN, lowN);
+    const tMs = c.datetimeUtc.getTime();
     if (sig.direction === "LONG") {
-      if (low.lte(sl)) return { result: "LOSS", price: sl.toNumber() };
-      if (high.gte(tp)) return { result: "WIN", price: tp.toNumber() };
+      if (low.lte(sl)) return { result: "LOSS", price: sl.toNumber(), mfePrice, maePrice, resolvedAtMs: tMs };
+      if (high.gte(tp)) return { result: "WIN", price: tp.toNumber(), mfePrice, maePrice, resolvedAtMs: tMs };
     } else {
-      if (high.gte(sl)) return { result: "LOSS", price: sl.toNumber() };
-      if (low.lte(tp)) return { result: "WIN", price: tp.toNumber() };
+      if (high.gte(sl)) return { result: "LOSS", price: sl.toNumber(), mfePrice, maePrice, resolvedAtMs: tMs };
+      if (low.lte(tp)) return { result: "WIN", price: tp.toNumber(), mfePrice, maePrice, resolvedAtMs: tMs };
     }
   }
 
-  return { result: "MISSED", price: null };
+  return { result: "MISSED", price: null, mfePrice, maePrice, resolvedAtMs: null };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -620,15 +714,27 @@ export async function reclassifyMissedSignals(opts: { windowHours?: number } = {
 
     let result: "WIN" | "LOSS" | null = null;
     let price: number | null = null;
+    let resolvedAtMs: number | null = null;
+    let mfePrice: number | null = null;
+    let maePrice: number | null = null;
     for (const c of relevant) {
       const high = new Decimal(c.high);
       const low = new Decimal(c.low);
+      const highN = high.toNumber();
+      const lowN = low.toNumber();
       if (sig.direction === "LONG") {
-        if (low.lte(sl)) { result = "LOSS"; price = sl.toNumber(); break; }
-        if (high.gte(tp)) { result = "WIN"; price = tp.toNumber(); break; }
+        mfePrice = mfePrice == null ? highN : Math.max(mfePrice, highN);
+        maePrice = maePrice == null ? lowN : Math.min(maePrice, lowN);
       } else {
-        if (high.gte(sl)) { result = "LOSS"; price = sl.toNumber(); break; }
-        if (low.lte(tp)) { result = "WIN"; price = tp.toNumber(); break; }
+        mfePrice = mfePrice == null ? lowN : Math.min(mfePrice, lowN);
+        maePrice = maePrice == null ? highN : Math.max(maePrice, highN);
+      }
+      if (sig.direction === "LONG") {
+        if (low.lte(sl)) { result = "LOSS"; price = sl.toNumber(); resolvedAtMs = c.datetimeUtc.getTime(); break; }
+        if (high.gte(tp)) { result = "WIN"; price = tp.toNumber(); resolvedAtMs = c.datetimeUtc.getTime(); break; }
+      } else {
+        if (high.gte(sl)) { result = "LOSS"; price = sl.toNumber(); resolvedAtMs = c.datetimeUtc.getTime(); break; }
+        if (low.lte(tp)) { result = "WIN"; price = tp.toNumber(); resolvedAtMs = c.datetimeUtc.getTime(); break; }
       }
     }
 
@@ -639,7 +745,13 @@ export async function reclassifyMissedSignals(opts: { windowHours?: number } = {
     }
 
     const newStatus = sig.status === "NEW" || sig.status === "ALERTED" ? "EXPIRED" : sig.status;
-    await storage.resolveSignal(sig.id, newStatus, result, price);
+    await storage.resolveSignal(
+      sig.id,
+      newStatus,
+      result,
+      price,
+      metricsFrom(sig, { result, price, mfePrice, maePrice, resolvedAtMs }),
+    );
     if (result === "WIN") { report.flippedToWin++; stratBucket.flippedToWin++; }
     else { report.flippedToLoss++; stratBucket.flippedToLoss++; }
   }
