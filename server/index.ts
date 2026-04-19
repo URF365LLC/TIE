@@ -90,6 +90,14 @@ app.use((req, res, next) => {
           .then((sp) => log(`Active strategy params: v${sp.version} ${sp.name}`, "boot"))
           .catch((err) => log(`Failed to seed strategy parameters: ${err.message}`, "boot")),
       );
+      import("./storage").then(({ storage }) =>
+        storage
+          .reconcileZombieBackfillJobs()
+          .then((n) => {
+            if (n > 0) log(`Reconciled ${n} zombie backfill job(s) from previous process`, "backfill");
+          })
+          .catch((err) => log(`Backfill zombie reconciliation failed: ${err.message}`, "backfill")),
+      );
       startScanner().catch((err) => log(`scanner start failed: ${err.message}`, "scanner"));
     },
   );

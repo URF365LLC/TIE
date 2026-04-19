@@ -256,25 +256,80 @@ export interface BackfillJob {
   error: string | null;
 }
 
+// In-memory cache of jobs created or refreshed this process. Persists to DB so
+// it survives a restart; the cache is just to avoid an extra round-trip while
+// a job is actively running and to ensure the running coroutine sees fresh
+// progress without re-reading.
 const jobs = new Map<string, BackfillJob>();
 
 function newJobId(): string {
   return `bf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function getBackfillJob(id: string): BackfillJob | undefined {
-  return jobs.get(id);
-}
-
-export function listBackfillJobs(): BackfillJob[] {
-  return Array.from(jobs.values()).sort((a, b) => b.startedAt - a.startedAt);
-}
-
-export async function runBackfill(opts: {
+interface BackfillRequest {
   days: number;
   timeframes: BackfillTimeframe[];
   symbols?: string[];
-}): Promise<BackfillJob> {
+}
+
+function rowToJob(row: import("@shared/schema").BackfillJobRow): BackfillJob {
+  return {
+    id: row.id,
+    status: row.status as BackfillJob["status"],
+    startedAt: row.startedAt.getTime(),
+    finishedAt: row.finishedAt ? row.finishedAt.getTime() : null,
+    estimate: row.estimateJson as BackfillEstimate,
+    progress: row.progressJson as BackfillJob["progress"],
+    results: (row.resultsJson as BackfillJob["results"]) ?? [],
+    creditsConsumed: row.creditsConsumed,
+    error: row.error,
+  };
+}
+
+async function persistJob(job: BackfillJob, request: BackfillRequest): Promise<void> {
+  try {
+    await storage.upsertBackfillJob({
+      id: job.id,
+      status: job.status,
+      startedAt: new Date(job.startedAt),
+      finishedAt: job.finishedAt ? new Date(job.finishedAt) : null,
+      requestJson: request,
+      estimateJson: job.estimate,
+      progressJson: job.progress,
+      resultsJson: job.results,
+      creditsConsumed: job.creditsConsumed,
+      error: job.error,
+    });
+  } catch (err: unknown) {
+    log(`Failed to persist backfill job ${job.id}: ${errMessage(err)}`, "backfill");
+  }
+}
+
+export async function getBackfillJob(id: string): Promise<BackfillJob | undefined> {
+  const cached = jobs.get(id);
+  if (cached && (cached.status === "running" || cached.status === "pending")) return cached;
+  const row = await storage.getBackfillJobById(id);
+  if (!row) return cached;
+  const fresh = rowToJob(row);
+  jobs.set(fresh.id, fresh);
+  return fresh;
+}
+
+export async function listBackfillJobs(): Promise<BackfillJob[]> {
+  const rows = await storage.listBackfillJobs(50);
+  const out = rows.map(rowToJob);
+  // Prefer fresher in-memory entries for jobs that are actively running so
+  // progress shown to the caller is monotonically increasing.
+  for (let i = 0; i < out.length; i++) {
+    const cached = jobs.get(out[i].id);
+    if (cached && (cached.status === "running" || cached.status === "pending")) {
+      out[i] = cached;
+    }
+  }
+  return out;
+}
+
+export async function runBackfill(opts: BackfillRequest): Promise<BackfillJob> {
   const estimate = await estimateBackfill(opts);
   const insts = await resolveInstruments(opts.symbols);
   const job: BackfillJob = {
@@ -296,6 +351,7 @@ export async function runBackfill(opts: {
     error: null,
   };
   jobs.set(job.id, job);
+  await persistJob(job, opts);
 
   // Run in background — don't block the HTTP response.
   void executeJob(job, insts, opts);
@@ -306,7 +362,7 @@ export async function runBackfill(opts: {
 async function executeJob(
   job: BackfillJob,
   insts: Instrument[],
-  opts: { days: number; timeframes: BackfillTimeframe[] },
+  opts: BackfillRequest,
 ): Promise<void> {
   try {
     for (const inst of insts) {
@@ -335,6 +391,9 @@ async function executeJob(
           }
           job.progress.completedRequests += PACK_REQUESTS_PER_WINDOW;
           job.creditsConsumed += PACK_REQUESTS_PER_WINDOW;
+          // Flush progress after every window so a crash mid-job leaves
+          // accurate counts in the DB and the UI can resume polling.
+          await persistJob(job, opts);
         }
         job.results.push({
           canonicalSymbol: inst.canonicalSymbol,
@@ -344,6 +403,7 @@ async function executeJob(
           indicatorsUpserted: totalIndicators,
           error: lastError,
         });
+        await persistJob(job, opts);
       }
       job.progress.instrumentsDone += 1;
     }
@@ -356,5 +416,6 @@ async function executeJob(
     job.finishedAt = Date.now();
     job.progress.currentSymbol = null;
     job.progress.currentTimeframe = null;
+    await persistJob(job, opts);
   }
 }

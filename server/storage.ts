@@ -13,6 +13,7 @@ import {
   strategyParameters,
   replayRuns,
   promotionNotifications,
+  backfillJobs,
   DEFAULT_STRATEGY_PARAMS,
   type Instrument,
   type InsertInstrument,
@@ -40,6 +41,8 @@ import {
   type InsertReplayRun,
   type PromotionNotification,
   type InsertPromotionNotification,
+  type BackfillJobRow,
+  type InsertBackfillJobRow,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -113,6 +116,12 @@ export interface IStorage {
 
   getSettings(): Promise<Settings>;
   upsertSettings(data: Partial<InsertSettings>): Promise<Settings>;
+
+  // Backfill jobs (persistent so they survive a server restart)
+  upsertBackfillJob(data: InsertBackfillJobRow): Promise<BackfillJobRow>;
+  getBackfillJobById(id: string): Promise<BackfillJobRow | undefined>;
+  listBackfillJobs(limit?: number): Promise<BackfillJobRow[]>;
+  reconcileZombieBackfillJobs(): Promise<number>;
 
   getDashboardStats(): Promise<{
     totalInstruments: number;
@@ -930,6 +939,51 @@ export class DatabaseStorage implements IStorage {
       lastScan: lastScans[0] ?? null,
       scanEnabled: s.scanEnabled,
     };
+  }
+
+  async upsertBackfillJob(data: InsertBackfillJobRow): Promise<BackfillJobRow> {
+    const [row] = await db
+      .insert(backfillJobs)
+      .values({ ...data, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: backfillJobs.id,
+        set: {
+          status: data.status,
+          finishedAt: data.finishedAt ?? null,
+          requestJson: data.requestJson,
+          estimateJson: data.estimateJson,
+          progressJson: data.progressJson,
+          resultsJson: data.resultsJson,
+          creditsConsumed: data.creditsConsumed ?? 0,
+          error: data.error ?? null,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return row;
+  }
+
+  async getBackfillJobById(id: string): Promise<BackfillJobRow | undefined> {
+    const [row] = await db.select().from(backfillJobs).where(eq(backfillJobs.id, id)).limit(1);
+    return row;
+  }
+
+  async listBackfillJobs(limit = 50): Promise<BackfillJobRow[]> {
+    return db.select().from(backfillJobs).orderBy(desc(backfillJobs.startedAt)).limit(limit);
+  }
+
+  async reconcileZombieBackfillJobs(): Promise<number> {
+    const result = await db
+      .update(backfillJobs)
+      .set({
+        status: "error",
+        finishedAt: new Date(),
+        error: sql`coalesce(${backfillJobs.error}, '') || '[reconciled at startup: server restarted mid-run]'`,
+        updatedAt: new Date(),
+      })
+      .where(inArray(backfillJobs.status, ["pending", "running"]))
+      .returning({ id: backfillJobs.id });
+    return result.length;
   }
 }
 

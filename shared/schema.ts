@@ -286,6 +286,24 @@ export const tradeAnalyses = pgTable("trade_analyses", {
   analyzedAt: timestamp("analyzed_at", tz).notNull().defaultNow(),
 });
 
+export const backfillJobs = pgTable(
+  "backfill_jobs",
+  {
+    id: varchar("id", { length: 40 }).primaryKey(),
+    status: varchar("status", { length: 20 }).notNull(),
+    startedAt: timestamp("started_at", tz).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", tz),
+    requestJson: jsonb("request_json").notNull(),
+    estimateJson: jsonb("estimate_json").notNull(),
+    progressJson: jsonb("progress_json").notNull(),
+    resultsJson: jsonb("results_json").notNull().default(sql`'[]'::jsonb`),
+    creditsConsumed: integer("credits_consumed").notNull().default(0),
+    error: text("error"),
+    updatedAt: timestamp("updated_at", tz).notNull().defaultNow(),
+  },
+  (table) => [index("backfill_jobs_started_at_idx").on(table.startedAt)],
+);
+
 export const insertInstrumentSchema = createInsertSchema(instruments).omit({ id: true, createdAt: true, updatedAt: true });
 export const insertCandleSchema = createInsertSchema(candles).omit({ id: true });
 export const insertIndicatorSchema = createInsertSchema(indicators).omit({ id: true });
@@ -323,6 +341,8 @@ export type ReplayRun = typeof replayRuns.$inferSelect;
 export type InsertReplayRun = z.infer<typeof insertReplayRunSchema>;
 export type PromotionNotification = typeof promotionNotifications.$inferSelect;
 export type InsertPromotionNotification = z.infer<typeof insertPromotionNotificationSchema>;
+export type BackfillJobRow = typeof backfillJobs.$inferSelect;
+export type InsertBackfillJobRow = typeof backfillJobs.$inferInsert;
 
 export const DEFAULT_STRATEGY_PARAMS: StrategyParamsConfig = {
   trendContinuation: {

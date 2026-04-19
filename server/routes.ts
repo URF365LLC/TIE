@@ -691,14 +691,24 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/admin/backfill", requireAdmin, (_req, res) => {
-    res.json({ jobs: listBackfillJobs() });
+  app.get("/api/admin/backfill", requireAdmin, async (_req, res) => {
+    try {
+      res.json({ jobs: await listBackfillJobs() });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ message });
+    }
   });
 
-  app.get("/api/admin/backfill/:id", requireAdmin, (req, res) => {
-    const job = getBackfillJob(String(req.params.id));
-    if (!job) return res.status(404).json({ message: "job not found" });
-    res.json(job);
+  app.get("/api/admin/backfill/:id", requireAdmin, async (req, res) => {
+    try {
+      const job = await getBackfillJob(String(req.params.id));
+      if (!job) return res.status(404).json({ message: "job not found" });
+      res.json(job);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ message });
+    }
   });
 
   return httpServer;
