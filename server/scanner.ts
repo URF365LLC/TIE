@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 import { fetchAllIndicatorsForSymbolMulti, getRateLimitState } from "./twelvedata";
 import { evaluateStrategies, hasRequiredIndicators, type StrategyRejection } from "./strategies";
 import { sendSignalAlert } from "./alerter";
+import { evaluatePromotionsAndNotify } from "./promotion";
 import { log } from "./logger";
 import { summarizeSignal } from "./summary";
 import type { Instrument, InsertCandle, InsertIndicator, Candle, Indicator, Signal, StrategyParamsConfig } from "@shared/schema";
@@ -110,6 +111,18 @@ async function tick(): Promise<void> {
     }
   } catch (err: any) {
     log(`Error expiring signals: ${err.message}`, "scanner");
+  }
+
+  // Proactive auto-promotion alerting: each tick, check whether any shadow set
+  // has crossed the significance threshold and surface a notification (email +
+  // dashboard banner) if we haven't already done so for that paramSetId.
+  try {
+    const result = await evaluatePromotionsAndNotify(settings);
+    if (result.created > 0) {
+      log(`Promotion notifications created: ${result.created} (emailed: ${result.emailed})`, "scanner");
+    }
+  } catch (err: any) {
+    log(`Error evaluating promotion notifications: ${err.message}`, "scanner");
   }
 }
 

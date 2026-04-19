@@ -12,6 +12,7 @@ import {
   tradeAnalyses,
   strategyParameters,
   replayRuns,
+  promotionNotifications,
   DEFAULT_STRATEGY_PARAMS,
   type Instrument,
   type InsertInstrument,
@@ -37,6 +38,8 @@ import {
   type SignalWithInstrument,
   type ReplayRun,
   type InsertReplayRun,
+  type PromotionNotification,
+  type InsertPromotionNotification,
 } from "@shared/schema";
 
 export interface IStorage {
@@ -96,6 +99,12 @@ export interface IStorage {
   getBacktestStats(): Promise<{ total: number; resolvedTotal: number; wins: number; losses: number; missed: number; unresolved: number; byStrategy: Record<string, { total: number; wins: number; losses: number }>; byDirection: Record<string, { total: number; wins: number; losses: number }>; takenWins: number; takenTotal: number; takenResolved: number }>;
 
   createAlertEvent(data: InsertAlertEvent): Promise<AlertEvent>;
+
+  // Promotion notifications (auto-promote alerting + dashboard banner)
+  getPromotionNotificationByParamSetId(paramSetId: number): Promise<PromotionNotification | undefined>;
+  createPromotionNotification(data: InsertPromotionNotification): Promise<PromotionNotification>;
+  listActivePromotionNotifications(): Promise<Array<PromotionNotification & { paramSetName: string; paramSetStatus: string }>>;
+  dismissPromotionNotification(id: number): Promise<PromotionNotification | undefined>;
 
   getTradeAnalysis(signalId: number): Promise<TradeAnalysis | undefined>;
   getTradeAnalyses(signalIds?: number[]): Promise<TradeAnalysis[]>;
@@ -849,6 +858,48 @@ export class DatabaseStorage implements IStorage {
       .update(settings)
       .set(data)
       .where(eq(settings.id, existing.id))
+      .returning();
+    return row;
+  }
+
+  async getPromotionNotificationByParamSetId(paramSetId: number): Promise<PromotionNotification | undefined> {
+    const rows = await db.select().from(promotionNotifications).where(eq(promotionNotifications.paramSetId, paramSetId)).limit(1);
+    return rows[0];
+  }
+
+  async createPromotionNotification(data: InsertPromotionNotification): Promise<PromotionNotification> {
+    const [row] = await db.insert(promotionNotifications).values(data).returning();
+    return row;
+  }
+
+  async listActivePromotionNotifications(): Promise<Array<PromotionNotification & { paramSetName: string; paramSetStatus: string }>> {
+    const rows = await db
+      .select({
+        id: promotionNotifications.id,
+        paramSetId: promotionNotifications.paramSetId,
+        paramSetVersion: promotionNotifications.paramSetVersion,
+        summary: promotionNotifications.summary,
+        comparisonJson: promotionNotifications.comparisonJson,
+        emailStatus: promotionNotifications.emailStatus,
+        emailError: promotionNotifications.emailError,
+        emailedAt: promotionNotifications.emailedAt,
+        dismissedAt: promotionNotifications.dismissedAt,
+        createdAt: promotionNotifications.createdAt,
+        paramSetName: strategyParameters.name,
+        paramSetStatus: strategyParameters.status,
+      })
+      .from(promotionNotifications)
+      .innerJoin(strategyParameters, eq(strategyParameters.id, promotionNotifications.paramSetId))
+      .where(and(isNull(promotionNotifications.dismissedAt), eq(strategyParameters.status, "shadow")))
+      .orderBy(desc(promotionNotifications.createdAt));
+    return rows;
+  }
+
+  async dismissPromotionNotification(id: number): Promise<PromotionNotification | undefined> {
+    const [row] = await db
+      .update(promotionNotifications)
+      .set({ dismissedAt: new Date() })
+      .where(eq(promotionNotifications.id, id))
       .returning();
     return row;
   }

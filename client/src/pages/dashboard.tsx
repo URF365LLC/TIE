@@ -4,12 +4,23 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Activity, Zap, BarChart3, Clock, Play, Pause, TrendingUp, TrendingDown, AlertCircle, ChevronDown, ChevronUp } from "lucide-react";
+import { Activity, Zap, BarChart3, Clock, Play, Pause, TrendingUp, TrendingDown, AlertCircle, ChevronDown, ChevronUp, Sparkles, X } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Link } from "wouter";
 import type { SignalWithInstrument, ScanRun } from "@shared/schema";
 import { DeepDiveButton, SummaryLine } from "@/components/signal-journal";
+
+interface PromotionNotificationRow {
+  id: number;
+  paramSetId: number;
+  paramSetVersion: number;
+  paramSetName: string;
+  summary: string;
+  emailStatus: string;
+  emailedAt: string | null;
+  createdAt: string;
+}
 
 export default function Dashboard() {
   const { toast } = useToast();
@@ -34,6 +45,24 @@ export default function Dashboard() {
   const { data: recentScans, isLoading: scansLoading } = useQuery<ScanRun[]>({
     queryKey: ["/api/scan/runs", "?limit=5"],
     refetchInterval: 15000,
+  });
+
+  const { data: promotionNotifs } = useQuery<PromotionNotificationRow[]>({
+    queryKey: ["/api/strategy-parameters/promotion-notifications"],
+    refetchInterval: 30000,
+  });
+
+  const dismissPromotion = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await apiRequest("POST", `/api/strategy-parameters/promotion-notifications/${id}/dismiss`);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/strategy-parameters/promotion-notifications"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Dismiss failed", description: err.message, variant: "destructive" });
+    },
   });
 
   const triggerScan = useMutation({
@@ -108,6 +137,54 @@ export default function Dashboard() {
           </Button>
         </div>
       </div>
+
+      {promotionNotifs && promotionNotifs.length > 0 && (
+        <div className="space-y-2" data-testid="banner-promotion-notifications">
+          {promotionNotifs.map((notif) => (
+            <Card
+              key={notif.id}
+              className="border-status-online/40 bg-status-online/5"
+              data-testid={`banner-promotion-${notif.id}`}
+            >
+              <CardContent className="p-4 flex items-start gap-3">
+                <div className="flex items-center justify-center w-8 h-8 rounded-md shrink-0 bg-status-online/10 text-status-online">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-semibold" data-testid={`text-promotion-title-${notif.id}`}>
+                      Better parameter set ready: v{notif.paramSetVersion} ({notif.paramSetName})
+                    </span>
+                    <Badge variant="secondary" className="text-[10px]">
+                      {notif.emailStatus === "sent" ? "Email sent" : notif.emailStatus === "error" ? "Email failed" : "Email skipped"}
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1" data-testid={`text-promotion-summary-${notif.id}`}>
+                    {notif.summary}
+                  </p>
+                  <div className="flex items-center gap-2 mt-3">
+                    <Link href="/parameters">
+                      <Button size="sm" data-testid={`button-promotion-review-${notif.id}`}>
+                        Review &amp; promote
+                      </Button>
+                    </Link>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => dismissPromotion.mutate(notif.id)}
+                      disabled={dismissPromotion.isPending}
+                      data-testid={`button-promotion-dismiss-${notif.id}`}
+                    >
+                      <X className="w-3.5 h-3.5 mr-1" />
+                      Dismiss
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard

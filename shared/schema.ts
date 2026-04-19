@@ -232,6 +232,28 @@ export const strategyParameters = pgTable("strategy_parameters", {
   createdAt: timestamp("created_at", tz).notNull().defaultNow(),
 });
 
+// One row per shadow parameter set that has crossed the auto-promotion
+// significance threshold. Acts as a throttle: while the row exists for a given
+// paramSetId, the scanner will not re-send the email or create a duplicate
+// banner. The user clearing the banner sets dismissedAt; promoting the set
+// makes its status='active' so it falls out of the "still shadow" filter.
+export const promotionNotifications = pgTable(
+  "promotion_notifications",
+  {
+    id: serial("id").primaryKey(),
+    paramSetId: integer("param_set_id").notNull().references(() => strategyParameters.id, { onDelete: "cascade" }).unique(),
+    paramSetVersion: integer("param_set_version").notNull(),
+    summary: text("summary").notNull(),
+    comparisonJson: jsonb("comparison_json").notNull(),
+    emailStatus: varchar("email_status", { length: 20 }).notNull(),
+    emailError: text("email_error"),
+    emailedAt: timestamp("emailed_at", tz),
+    dismissedAt: timestamp("dismissed_at", tz),
+    createdAt: timestamp("created_at", tz).notNull().defaultNow(),
+  },
+  (table) => [index("promotion_notifications_dismissed_idx").on(table.dismissedAt)],
+);
+
 export const replayRuns = pgTable("replay_runs", {
   id: serial("id").primaryKey(),
   paramSetId: integer("param_set_id").notNull().references(() => strategyParameters.id, { onDelete: "cascade" }),
@@ -272,6 +294,7 @@ export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true
 export const insertStrategyParametersSchema = createInsertSchema(strategyParameters).omit({ id: true, createdAt: true });
 export const insertTradeAnalysisSchema = createInsertSchema(tradeAnalyses).omit({ id: true, analyzedAt: true });
 export const insertReplayRunSchema = createInsertSchema(replayRuns).omit({ id: true, createdAt: true });
+export const insertPromotionNotificationSchema = createInsertSchema(promotionNotifications).omit({ id: true, createdAt: true });
 
 export type Instrument = typeof instruments.$inferSelect;
 export type InsertInstrument = z.infer<typeof insertInstrumentSchema>;
@@ -295,6 +318,8 @@ export type TradeAnalysis = typeof tradeAnalyses.$inferSelect;
 export type InsertTradeAnalysis = z.infer<typeof insertTradeAnalysisSchema>;
 export type ReplayRun = typeof replayRuns.$inferSelect;
 export type InsertReplayRun = z.infer<typeof insertReplayRunSchema>;
+export type PromotionNotification = typeof promotionNotifications.$inferSelect;
+export type InsertPromotionNotification = z.infer<typeof insertPromotionNotificationSchema>;
 
 export const DEFAULT_STRATEGY_PARAMS: StrategyParamsConfig = {
   trendContinuation: {

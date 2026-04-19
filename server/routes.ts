@@ -10,6 +10,7 @@ import { insertStrategyParametersSchema } from "@shared/schema";
 import { summarizeSignal } from "./summary";
 import { runReplay } from "./replay";
 import { estimateBackfill, runBackfill, getBackfillJob, listBackfillJobs, type BackfillTimeframe } from "./backfill";
+import { computePromotionRecommendations } from "./promotion";
 
 const journalSchema = z.object({
   notes: z.string().max(5000).nullable().optional(),
@@ -602,84 +603,32 @@ export async function registerRoutes(
     const maxPValue = Math.max(0.0001, Math.min(0.5, parseFloat(String(req.query.maxP ?? "0.05")) || 0.05));
 
     try {
-      const rows = await storage.getRollingWinRateByParamSet(days);
-      const active = rows.find((r) => r.status === "active");
-      const recommendations = [] as Array<{
-        paramSetId: number;
-        version: number;
-        name: string;
-        comparison: {
-          windowDays: number;
-          activeVersion: number | null;
-          activeName: string | null;
-          activeWins: number;
-          activeLosses: number;
-          activeTotal: number;
-          activeWinRate: number | null;
-          shadowWins: number;
-          shadowLosses: number;
-          shadowTotal: number;
-          shadowWinRate: number;
-          deltaPp: number;
-          zScore: number;
-          pValue: number;
-          minSampleSize: number;
-          minDeltaPp: number;
-          maxPValue: number;
-        };
-        summary: string;
-      }>;
+      const result = await computePromotionRecommendations({ windowDays: days, minSampleSize, minDeltaPp, maxPValue });
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
 
-      if (active && active.total >= minSampleSize) {
-        for (const r of rows) {
-          if (r.paramSetId === active.paramSetId) continue;
-          if (r.status !== "shadow") continue;
-          if (r.total < minSampleSize) continue;
-          if (r.winRate == null || active.winRate == null) continue;
-          const deltaPp = r.winRate - active.winRate;
-          if (deltaPp < minDeltaPp) continue;
-          const z = twoProportionZ(r.wins, r.total, active.wins, active.total);
-          if (!Number.isFinite(z) || z <= 0) continue;
-          const pValue = 1 - normCdf(z);
-          if (pValue > maxPValue) continue;
-          const summary = `v${r.version} (${r.name}) shadow win rate ${r.winRate.toFixed(1)}% beats active v${active.version} ${active.winRate.toFixed(1)}% by ${deltaPp.toFixed(1)}pp over ${r.total} resolved signals (vs ${active.total}) in the last ${days}d (p=${pValue.toFixed(3)}).`;
-          recommendations.push({
-            paramSetId: r.paramSetId,
-            version: r.version,
-            name: r.name,
-            comparison: {
-              windowDays: days,
-              activeVersion: active.version,
-              activeName: active.name,
-              activeWins: active.wins,
-              activeLosses: active.losses,
-              activeTotal: active.total,
-              activeWinRate: active.winRate,
-              shadowWins: r.wins,
-              shadowLosses: r.losses,
-              shadowTotal: r.total,
-              shadowWinRate: r.winRate,
-              deltaPp,
-              zScore: z,
-              pValue,
-              minSampleSize,
-              minDeltaPp,
-              maxPValue,
-            },
-            summary,
-          });
-        }
-        recommendations.sort((a, b) => b.comparison.deltaPp - a.comparison.deltaPp);
-      }
+  // Active (undismissed) auto-promotion notifications surfaced as a dashboard
+  // banner. Filtered server-side to sets that are still 'shadow' so the banner
+  // disappears automatically once the user promotes the set.
+  app.get("/api/strategy-parameters/promotion-notifications", async (_req, res) => {
+    try {
+      const rows = await storage.listActivePromotionNotifications();
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
 
-      res.json({
-        windowDays: days,
-        thresholds: { minSampleSize, minDeltaPp, maxPValue },
-        active: active
-          ? { paramSetId: active.paramSetId, version: active.version, name: active.name, total: active.total, winRate: active.winRate }
-          : null,
-        recommendations,
-      });
+  app.post("/api/strategy-parameters/promotion-notifications/:id/dismiss", async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "invalid id" });
+    try {
+      const row = await storage.dismissPromotionNotification(id);
+      if (!row) return res.status(404).json({ message: "not found" });
+      res.json(row);
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
@@ -748,25 +697,3 @@ export async function registerRoutes(
   return httpServer;
 }
 
-// One-sided two-proportion z-test (pooled variance) comparing shadow vs active.
-// Positive z means the shadow set outperforms.
-function twoProportionZ(winsA: number, totalA: number, winsB: number, totalB: number): number {
-  if (totalA <= 0 || totalB <= 0) return NaN;
-  const pA = winsA / totalA;
-  const pB = winsB / totalB;
-  const pPool = (winsA + winsB) / (totalA + totalB);
-  const se = Math.sqrt(pPool * (1 - pPool) * (1 / totalA + 1 / totalB));
-  if (se === 0) return NaN;
-  return (pA - pB) / se;
-}
-
-// Standard normal CDF via Abramowitz & Stegun 26.2.17.
-function normCdf(z: number): number {
-  const sign = z < 0 ? -1 : 1;
-  const x = Math.abs(z);
-  const t = 1 / (1 + 0.2316419 * x);
-  const d = 0.3989422804014327 * Math.exp(-(x * x) / 2);
-  const poly = t * (0.31938153 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
-  const tail = d * poly;
-  return 0.5 + sign * (0.5 - tail);
-}
