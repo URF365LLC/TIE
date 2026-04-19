@@ -63,6 +63,8 @@ const settingsUpdateSchema = z.object({
   promotionMinSamples: z.number().int().min(5).max(1000).optional(),
   promotionMinDeltaPp: z.number().min(0).max(50).optional(),
   promotionMaxPValue: z.number().min(0.0001).max(0.5).optional(),
+  promotionReminderDays: z.number().int().min(1).max(60).optional(),
+  promotionMaxReminders: z.number().int().min(0).max(20).optional(),
 }).refine(
   (data) =>
     data.tdCreditTargetPerMin == null ||

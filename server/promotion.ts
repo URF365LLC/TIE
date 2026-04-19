@@ -114,7 +114,7 @@ export async function computePromotionRecommendations(opts: {
 // notification row yet, create one and (best-effort) send an email. The unique
 // constraint on promotion_notifications.paramSetId is what enforces throttling
 // across scanner ticks and process restarts.
-export async function evaluatePromotionsAndNotify(settings: Settings): Promise<{ created: number; emailed: number }> {
+export async function evaluatePromotionsAndNotify(settings: Settings): Promise<{ created: number; emailed: number; reminded: number }> {
   let result;
   try {
     result = await computePromotionRecommendations({
@@ -124,14 +124,67 @@ export async function evaluatePromotionsAndNotify(settings: Settings): Promise<{
     });
   } catch (err: any) {
     log(`Promotion evaluation failed: ${err.message}`, "promotion");
-    return { created: 0, emailed: 0 };
+    return { created: 0, emailed: 0, reminded: 0 };
   }
+
+  const reminderDays = Math.max(1, settings.promotionReminderDays ?? 3);
+  const maxReminders = Math.max(0, settings.promotionMaxReminders ?? 3);
+  const reminderIntervalMs = reminderDays * 24 * 60 * 60 * 1000;
 
   let created = 0;
   let emailed = 0;
+  let reminded = 0;
   for (const rec of result.recommendations) {
     const existing = await storage.getPromotionNotificationByParamSetId(rec.paramSetId);
-    if (existing) continue;
+    if (existing) {
+      // The recommendation still applies (we are iterating over current
+      // recommendations) and the row has not been dismissed → consider sending
+      // a reminder. We only send reminders when the original email actually
+      // went out, when SMTP is currently configured, and when the configured
+      // cadence + max-reminder cap allow it.
+      if (existing.dismissedAt) continue;
+      if (!settings.emailEnabled) continue;
+      if (maxReminders <= 0) continue;
+      if (existing.reminderCount >= maxReminders) continue;
+      const lastSentAt = existing.lastReminderAt ?? existing.emailedAt;
+      if (!lastSentAt) continue; // never successfully emailed → nothing to remind
+      const elapsed = Date.now() - new Date(lastSentAt).getTime();
+      if (elapsed < reminderIntervalMs) continue;
+
+      const reminderNumber = existing.reminderCount + 1;
+      try {
+        const sent = await sendPromotionEmail(rec, settings, {
+          reminderNumber,
+          maxReminders,
+        });
+        if (sent.sent) {
+          await storage.recordPromotionNotificationReminder(existing.id, {
+            emailStatus: "sent",
+            emailError: null,
+            lastReminderAt: new Date(),
+          });
+          reminded++;
+          emailed++;
+          log(
+            `Promotion reminder ${reminderNumber}/${maxReminders} sent for v${rec.version} (${rec.name})`,
+            "promotion",
+          );
+        } else {
+          log(
+            `Promotion reminder skipped for v${rec.version}: ${sent.reason ?? "unknown"}`,
+            "promotion",
+          );
+        }
+      } catch (err: any) {
+        const msg = err?.message ?? String(err);
+        // Intentionally do NOT advance reminderCount/lastReminderAt on
+        // failure — otherwise transient SMTP errors would consume the
+        // user's max-reminder budget and delay the next attempt by a full
+        // cadence. The next scanner tick will retry.
+        log(`Promotion reminder failed for v${rec.version}: ${msg}`, "promotion");
+      }
+      continue;
+    }
 
     let emailStatus: "sent" | "skipped" | "error" = "skipped";
     let emailError: string | null = null;
@@ -174,7 +227,7 @@ export async function evaluatePromotionsAndNotify(settings: Settings): Promise<{
     }
   }
 
-  return { created, emailed };
+  return { created, emailed, reminded };
 }
 
 let promotionTransporter: nodemailer.Transporter | null = null;
@@ -197,6 +250,7 @@ function getPromotionTransporter(): nodemailer.Transporter | null {
 async function sendPromotionEmail(
   rec: PromotionRecommendation,
   settings: Settings,
+  reminder?: { reminderNumber: number; maxReminders: number },
 ): Promise<{ sent: boolean; reason?: string }> {
   const mailer = getPromotionTransporter();
   const toEmail = settings.alertToEmail || process.env.ALERT_TO_EMAIL;
@@ -206,9 +260,15 @@ async function sendPromotionEmail(
   }
 
   const c = rec.comparison;
-  const subject = `[Promotion Recommended] v${rec.version} ${rec.name} - +${c.deltaPp.toFixed(1)}pp win rate`;
+  const reminderTag = reminder
+    ? `[Reminder ${reminder.reminderNumber}/${reminder.maxReminders}] `
+    : "";
+  const subject = `${reminderTag}[Promotion Recommended] v${rec.version} ${rec.name} - +${c.deltaPp.toFixed(1)}pp win rate`;
+  const reminderPreamble = reminder
+    ? `This is reminder ${reminder.reminderNumber} of ${reminder.maxReminders}: an earlier promotion recommendation is still pending review.\n\n`
+    : "";
   const body = `
-A shadow parameter set has crossed the auto-promotion threshold.
+${reminderPreamble}A shadow parameter set has crossed the auto-promotion threshold.
 
 Recommended: v${rec.version} (${rec.name})
   Win rate: ${c.shadowWinRate.toFixed(1)}% (${c.shadowWins}W / ${c.shadowLosses}L of ${c.shadowTotal})

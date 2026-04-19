@@ -108,6 +108,7 @@ export interface IStorage {
   createPromotionNotification(data: InsertPromotionNotification): Promise<PromotionNotification>;
   listActivePromotionNotifications(): Promise<Array<PromotionNotification & { paramSetName: string; paramSetStatus: string }>>;
   dismissPromotionNotification(id: number): Promise<PromotionNotification | undefined>;
+  recordPromotionNotificationReminder(id: number, data: { emailStatus: string; emailError: string | null; lastReminderAt: Date }): Promise<PromotionNotification | undefined>;
 
   getTradeAnalysis(signalId: number): Promise<TradeAnalysis | undefined>;
   getTradeAnalyses(signalIds?: number[]): Promise<TradeAnalysis[]>;
@@ -893,6 +894,8 @@ export class DatabaseStorage implements IStorage {
         emailError: promotionNotifications.emailError,
         emailedAt: promotionNotifications.emailedAt,
         dismissedAt: promotionNotifications.dismissedAt,
+        reminderCount: promotionNotifications.reminderCount,
+        lastReminderAt: promotionNotifications.lastReminderAt,
         createdAt: promotionNotifications.createdAt,
         paramSetName: strategyParameters.name,
         paramSetStatus: strategyParameters.status,
@@ -908,6 +911,23 @@ export class DatabaseStorage implements IStorage {
     const [row] = await db
       .update(promotionNotifications)
       .set({ dismissedAt: new Date() })
+      .where(eq(promotionNotifications.id, id))
+      .returning();
+    return row;
+  }
+
+  async recordPromotionNotificationReminder(
+    id: number,
+    data: { emailStatus: string; emailError: string | null; lastReminderAt: Date },
+  ): Promise<PromotionNotification | undefined> {
+    const [row] = await db
+      .update(promotionNotifications)
+      .set({
+        emailStatus: data.emailStatus,
+        emailError: data.emailError,
+        lastReminderAt: data.lastReminderAt,
+        reminderCount: sql`${promotionNotifications.reminderCount} + 1`,
+      })
       .where(eq(promotionNotifications.id, id))
       .returning();
     return row;

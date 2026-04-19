@@ -184,6 +184,8 @@ export const settings = pgTable("settings", {
   promotionMinSamples: integer("promotion_min_samples").notNull().default(20),
   promotionMinDeltaPp: doublePrecision("promotion_min_delta_pp").notNull().default(5),
   promotionMaxPValue: doublePrecision("promotion_max_p_value").notNull().default(0.05),
+  promotionReminderDays: integer("promotion_reminder_days").notNull().default(3),
+  promotionMaxReminders: integer("promotion_max_reminders").notNull().default(3),
 });
 
 export interface StrategyParamsConfig {
@@ -252,6 +254,8 @@ export const promotionNotifications = pgTable(
     emailError: text("email_error"),
     emailedAt: timestamp("emailed_at", tz),
     dismissedAt: timestamp("dismissed_at", tz),
+    reminderCount: integer("reminder_count").notNull().default(0),
+    lastReminderAt: timestamp("last_reminder_at", tz),
     createdAt: timestamp("created_at", tz).notNull().defaultNow(),
   },
   (table) => [index("promotion_notifications_dismissed_idx").on(table.dismissedAt)],

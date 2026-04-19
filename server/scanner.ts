@@ -118,8 +118,8 @@ async function tick(): Promise<void> {
   // dashboard banner) if we haven't already done so for that paramSetId.
   try {
     const result = await evaluatePromotionsAndNotify(settings);
-    if (result.created > 0) {
-      log(`Promotion notifications created: ${result.created} (emailed: ${result.emailed})`, "scanner");
+    if (result.created > 0 || result.reminded > 0) {
+      log(`Promotion notifications created: ${result.created} (emailed: ${result.emailed}, reminded: ${result.reminded})`, "scanner");
     }
   } catch (err: any) {
     log(`Error evaluating promotion notifications: ${err.message}`, "scanner");

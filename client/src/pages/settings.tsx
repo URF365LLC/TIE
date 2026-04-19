@@ -38,6 +38,8 @@ export default function SettingsPage() {
     promotionMinSamples: 20,
     promotionMinDeltaPp: 5,
     promotionMaxPValue: 0.05,
+    promotionReminderDays: 3,
+    promotionMaxReminders: 3,
   });
 
   useEffect(() => {
@@ -60,6 +62,8 @@ export default function SettingsPage() {
         promotionMinSamples: settings.promotionMinSamples ?? 20,
         promotionMinDeltaPp: settings.promotionMinDeltaPp ?? 5,
         promotionMaxPValue: settings.promotionMaxPValue ?? 0.05,
+        promotionReminderDays: settings.promotionReminderDays ?? 3,
+        promotionMaxReminders: settings.promotionMaxReminders ?? 3,
       });
     }
   }, [settings]);
@@ -288,6 +292,42 @@ export default function SettingsPage() {
           <div className="rounded-md bg-muted/50 p-3">
             <p className="text-[11px] text-muted-foreground">
               Stricter values (larger samples, higher edge, lower p-value) reduce false-positive promotions but slow adoption of better parameter sets. Looser values do the opposite.
+            </p>
+          </div>
+          <Separator />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label className="text-sm">Reminder Cadence (days)</Label>
+              <Input
+                type="number"
+                min={1}
+                max={60}
+                value={form.promotionReminderDays}
+                onChange={(e) => setForm({ ...form, promotionReminderDays: parseInt(e.target.value) || 3 })}
+                data-testid="input-promotion-reminder-days"
+              />
+              <p className="text-[11px] text-muted-foreground">Resend the recommendation email if it has been unread this many days (default 3)</p>
+            </div>
+            <div className="space-y-2">
+              <Label className="text-sm">Max Reminders</Label>
+              <Input
+                type="number"
+                min={0}
+                max={20}
+                value={form.promotionMaxReminders}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  const parsed = parseInt(raw);
+                  setForm({ ...form, promotionMaxReminders: raw === "" ? 3 : Number.isFinite(parsed) ? parsed : 3 });
+                }}
+                data-testid="input-promotion-max-reminders"
+              />
+              <p className="text-[11px] text-muted-foreground">Stop after this many reminder emails per recommendation (default 3, set 0 to disable)</p>
+            </div>
+          </div>
+          <div className="rounded-md bg-muted/50 p-3">
+            <p className="text-[11px] text-muted-foreground">
+              Reminders only resend while the recommendation is still active (shadow set undismissed and still beating the threshold). Dismissing the dashboard banner stops further reminders.
             </p>
           </div>
         </CardContent>
