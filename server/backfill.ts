@@ -240,6 +240,15 @@ export interface BackfillJob {
     instrumentsTotal: number;
     currentSymbol: string | null;
     currentTimeframe: BackfillTimeframe | null;
+    // Window-level completion tracking so a restart can skip already-fetched
+    // (symbol, timeframe, window) combinations and avoid re-spending credits.
+    completedWindows?: string[];
+    // Per-(symbol|timeframe) running counts so a tf still in progress at
+    // restart can resume its accumulators instead of starting at zero.
+    partialResults?: Record<string, { candles: number; indicators: number; lastError?: string }>;
+    // True when this job was picked back up by the worker after a process
+    // restart (surfaced as a badge in the UI).
+    resumed?: boolean;
   };
   results: Array<{
     canonicalSymbol: string;
@@ -329,6 +338,27 @@ export async function listBackfillJobs(): Promise<BackfillJob[]> {
   return out;
 }
 
+export async function resumeBackfillJobs(): Promise<number> {
+  const rows = await storage.listBackfillJobs(50);
+  const toResume = rows.filter((r) => r.status === "pending" || r.status === "running");
+  for (const row of toResume) {
+    const job = rowToJob(row);
+    job.status = "running";
+    if (!job.progress.completedWindows) job.progress.completedWindows = [];
+    if (!job.progress.partialResults) job.progress.partialResults = {};
+    job.progress.resumed = true;
+    job.progress.currentSymbol = null;
+    job.progress.currentTimeframe = null;
+    const request = (row.requestJson as BackfillRequest) ?? { days: 7, timeframes: ["15m", "1h", "4h"] };
+    const insts = await resolveInstruments(request.symbols);
+    jobs.set(job.id, job);
+    await persistJob(job, request);
+    log(`Resuming backfill job ${job.id} (${job.progress.completedRequests}/${job.progress.totalRequests} requests done)`, "backfill");
+    void executeJob(job, insts, request);
+  }
+  return toResume.length;
+}
+
 export async function runBackfill(opts: BackfillRequest): Promise<BackfillJob> {
   const estimate = await estimateBackfill(opts);
   const insts = await resolveInstruments(opts.symbols);
@@ -345,6 +375,9 @@ export async function runBackfill(opts: BackfillRequest): Promise<BackfillJob> {
       instrumentsTotal: insts.length,
       currentSymbol: null,
       currentTimeframe: null,
+      completedWindows: [],
+      partialResults: {},
+      resumed: false,
     },
     results: [],
     creditsConsumed: 0,
@@ -365,15 +398,50 @@ async function executeJob(
   opts: BackfillRequest,
 ): Promise<void> {
   try {
+    if (!job.progress.completedWindows) job.progress.completedWindows = [];
+    if (!job.progress.partialResults) job.progress.partialResults = {};
+    const completedSet = new Set(job.progress.completedWindows);
+    // Anchor windows to the job's original start time so window boundaries are
+    // identical across restarts. Without this, computeWindows uses a fresh
+    // `new Date()` and the (start,end) pairs — and therefore the wKey skip
+    // identifiers — would shift, defeating the resume.
+    const anchor = new Date(job.startedAt);
+    // Reconcile counter from authoritative sources before resuming so stale
+    // values from a prior crash don't display incorrectly to the user.
+    const completedInstSyms = new Set<string>();
+    for (const i of insts) {
+      const allDone = opts.timeframes.every((tf) =>
+        job.results.some((r) => r.canonicalSymbol === i.canonicalSymbol && r.timeframe === tf),
+      );
+      if (allDone) completedInstSyms.add(i.canonicalSymbol);
+    }
+    job.progress.instrumentsDone = completedInstSyms.size;
     for (const inst of insts) {
+      // Skip whole instrument if every requested timeframe already has a final
+      // result row from a previous run — avoids double-counting instrumentsDone.
+      const allTfsDone = opts.timeframes.every((tf) =>
+        job.results.some((r) => r.canonicalSymbol === inst.canonicalSymbol && r.timeframe === tf),
+      );
+      if (allTfsDone && job.results.length > 0) continue;
+
       job.progress.currentSymbol = inst.canonicalSymbol;
       for (const tf of opts.timeframes) {
+        // Skip timeframes that already finished (have a result entry).
+        if (
+          job.results.some((r) => r.canonicalSymbol === inst.canonicalSymbol && r.timeframe === tf)
+        ) {
+          continue;
+        }
         job.progress.currentTimeframe = tf;
-        const windows = computeWindows(tf, opts.days, inst.assetClass);
-        let totalCandles = 0;
-        let totalIndicators = 0;
-        let lastError: string | undefined;
+        const windows = computeWindows(tf, opts.days, inst.assetClass, anchor);
+        const tfKey = `${inst.canonicalSymbol}|${tf}`;
+        const partial = job.progress.partialResults[tfKey] ?? { candles: 0, indicators: 0 };
+        let totalCandles = partial.candles;
+        let totalIndicators = partial.indicators;
+        let lastError: string | undefined = partial.lastError;
         for (const w of windows) {
+          const wKey = `${inst.canonicalSymbol}|${tf}|${w.startDate}|${w.endDate}`;
+          if (completedSet.has(wKey)) continue;
           try {
             const pack = await fetchAllIndicatorsForSymbolRange(
               inst.vendorSymbol,
@@ -385,12 +453,19 @@ async function executeJob(
             const counts = await persistPack(inst, tf, pack);
             totalCandles += counts.candles;
             totalIndicators += counts.indicators;
+            completedSet.add(wKey);
+            job.progress.completedWindows.push(wKey);
           } catch (err: unknown) {
             lastError = errMessage(err);
             log(`Backfill ${inst.canonicalSymbol} ${tf} ${w.startDate}→${w.endDate} failed: ${lastError}`, "backfill");
           }
           job.progress.completedRequests += PACK_REQUESTS_PER_WINDOW;
           job.creditsConsumed += PACK_REQUESTS_PER_WINDOW;
+          job.progress.partialResults[tfKey] = {
+            candles: totalCandles,
+            indicators: totalIndicators,
+            lastError,
+          };
           // Flush progress after every window so a crash mid-job leaves
           // accurate counts in the DB and the UI can resume polling.
           await persistJob(job, opts);
@@ -403,6 +478,7 @@ async function executeJob(
           indicatorsUpserted: totalIndicators,
           error: lastError,
         });
+        delete job.progress.partialResults[tfKey];
         await persistJob(job, opts);
       }
       job.progress.instrumentsDone += 1;

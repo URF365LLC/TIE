@@ -40,6 +40,7 @@ interface Job {
     instrumentsTotal: number;
     currentSymbol: string | null;
     currentTimeframe: Tf | null;
+    resumed?: boolean;
   };
   results: Array<{
     canonicalSymbol: string;
@@ -407,7 +408,18 @@ export default function BackfillPage() {
                         >
                           <td className="p-2 font-mono text-[11px]">{j.id.slice(0, 8)}…</td>
                           <td className="p-2">
-                            <JobBadge status={j.status} />
+                            <div className="flex items-center gap-1">
+                              <JobBadge status={j.status} />
+                              {j.progress.resumed && (
+                                <Badge
+                                  variant="outline"
+                                  className="bg-chart-3/15 text-chart-3"
+                                  data-testid={`badge-recent-resumed-${j.id}`}
+                                >
+                                  Resumed
+                                </Badge>
+                              )}
+                            </div>
                           </td>
                           <td className="p-2 text-muted-foreground">{fmtTime(j.startedAt)}</td>
                           <td className="p-2 text-muted-foreground">
@@ -439,6 +451,15 @@ export default function BackfillPage() {
                 <CardTitle className="text-base font-medium flex items-center gap-2">
                   Job Progress
                   <JobBadge status={job?.status} />
+                  {job?.progress.resumed && (
+                    <Badge
+                      variant="outline"
+                      className="bg-chart-3/15 text-chart-3"
+                      data-testid="badge-job-resumed"
+                    >
+                      Resumed
+                    </Badge>
+                  )}
                 </CardTitle>
                 <CardDescription className="text-xs font-mono">{jobId}</CardDescription>
               </div>

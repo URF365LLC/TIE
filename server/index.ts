@@ -90,13 +90,12 @@ app.use((req, res, next) => {
           .then((sp) => log(`Active strategy params: v${sp.version} ${sp.name}`, "boot"))
           .catch((err) => log(`Failed to seed strategy parameters: ${err.message}`, "boot")),
       );
-      import("./storage").then(({ storage }) =>
-        storage
-          .reconcileZombieBackfillJobs()
+      import("./backfill").then(({ resumeBackfillJobs }) =>
+        resumeBackfillJobs()
           .then((n) => {
-            if (n > 0) log(`Reconciled ${n} zombie backfill job(s) from previous process`, "backfill");
+            if (n > 0) log(`Resumed ${n} in-flight backfill job(s) from previous process`, "backfill");
           })
-          .catch((err) => log(`Backfill zombie reconciliation failed: ${err.message}`, "backfill")),
+          .catch((err) => log(`Backfill resume failed: ${err.message}`, "backfill")),
       );
       const pruneBackfillJobs = () =>
         import("./storage").then(({ storage }) =>
