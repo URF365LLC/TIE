@@ -124,6 +124,7 @@ export interface IStorage {
   getBackfillJobById(id: string): Promise<BackfillJobRow | undefined>;
   listBackfillJobs(limit?: number): Promise<BackfillJobRow[]>;
   reconcileZombieBackfillJobs(): Promise<number>;
+  pruneOldBackfillJobs(opts?: { keepLast?: number; maxAgeMs?: number }): Promise<number>;
 
   getDashboardStats(): Promise<{
     totalInstruments: number;
@@ -1027,6 +1028,27 @@ export class DatabaseStorage implements IStorage {
         updatedAt: new Date(),
       })
       .where(inArray(backfillJobs.status, ["pending", "running"]))
+      .returning({ id: backfillJobs.id });
+    return result.length;
+  }
+
+  async pruneOldBackfillJobs(opts?: { keepLast?: number; maxAgeMs?: number }): Promise<number> {
+    const keepLast = opts?.keepLast ?? 100;
+    const maxAgeMs = opts?.maxAgeMs ?? 30 * 24 * 60 * 60 * 1000;
+    const cutoff = new Date(Date.now() - maxAgeMs);
+    const result = await db
+      .delete(backfillJobs)
+      .where(
+        and(
+          inArray(backfillJobs.status, ["completed", "error"]),
+          lt(backfillJobs.startedAt, cutoff),
+          sql`${backfillJobs.id} NOT IN (
+            SELECT id FROM ${backfillJobs}
+            ORDER BY ${backfillJobs.startedAt} DESC
+            LIMIT ${keepLast}
+          )`,
+        ),
+      )
       .returning({ id: backfillJobs.id });
     return result.length;
   }

@@ -98,6 +98,17 @@ app.use((req, res, next) => {
           })
           .catch((err) => log(`Backfill zombie reconciliation failed: ${err.message}`, "backfill")),
       );
+      const pruneBackfillJobs = () =>
+        import("./storage").then(({ storage }) =>
+          storage
+            .pruneOldBackfillJobs()
+            .then((n) => {
+              if (n > 0) log(`Pruned ${n} old backfill job record(s) (keep last 100 or <30 days)`, "backfill");
+            })
+            .catch((err) => log(`Backfill prune failed: ${err.message}`, "backfill")),
+        );
+      pruneBackfillJobs();
+      setInterval(pruneBackfillJobs, 24 * 60 * 60 * 1000).unref();
       startScanner().catch((err) => log(`scanner start failed: ${err.message}`, "scanner"));
     },
   );
