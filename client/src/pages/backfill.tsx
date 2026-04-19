@@ -9,7 +9,7 @@ import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Database, Play, Calculator, AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
+import { Database, Play, Calculator, AlertCircle, CheckCircle2, Loader2, History } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 type Tf = "15m" | "1h" | "4h";
@@ -54,6 +54,14 @@ interface Job {
 }
 
 const ALL_TFS: Tf[] = ["15m", "1h", "4h"];
+
+function fmtTime(ms: number): string {
+  try {
+    return new Date(ms).toLocaleString();
+  } catch {
+    return String(ms);
+  }
+}
 
 function fmtDuration(sec: number): string {
   if (sec < 60) return `${sec}s`;
@@ -161,6 +169,24 @@ export default function BackfillPage() {
       const data = q.state.data as Job | undefined;
       if (!data) return 2000;
       return data.status === "running" || data.status === "pending" ? 2000 : false;
+    },
+  });
+
+  const { data: jobsList } = useQuery<{ jobs: Job[] }>({
+    queryKey: ["/api/admin/backfill", "list"],
+    queryFn: async () => {
+      const res = await fetch("/api/admin/backfill", {
+        headers: buildHeaders(false),
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error(`${res.status}: ${(await res.text()) || res.statusText}`);
+      return (await res.json()) as { jobs: Job[] };
+    },
+    refetchInterval: (q) => {
+      const data = q.state.data as { jobs: Job[] } | undefined;
+      const anyActive = data?.jobs.some((j) => j.status === "running" || j.status === "pending");
+      const selectedActive = job?.status === "running" || job?.status === "pending";
+      return anyActive || selectedActive ? 2000 : 10000;
     },
   });
 
@@ -337,6 +363,70 @@ export default function BackfillPage() {
                 </div>
               </div>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {jobsList && jobsList.jobs.length > 0 && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <History className="w-4 h-4 text-muted-foreground" />
+              <div>
+                <CardTitle className="text-base font-medium">Recent Jobs</CardTitle>
+                <CardDescription className="text-xs">
+                  Click a row to view its progress and per-symbol results.
+                </CardDescription>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="rounded-md border overflow-hidden">
+              <div className="max-h-72 overflow-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-muted/50 sticky top-0">
+                    <tr>
+                      <th className="text-left p-2 font-medium">Job</th>
+                      <th className="text-left p-2 font-medium">Status</th>
+                      <th className="text-left p-2 font-medium">Started</th>
+                      <th className="text-left p-2 font-medium">Finished</th>
+                      <th className="text-right p-2 font-medium">Instruments</th>
+                      <th className="text-right p-2 font-medium">Requests</th>
+                      <th className="text-right p-2 font-medium">Credits</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {jobsList.jobs.map((j) => {
+                      const selected = j.id === jobId;
+                      return (
+                        <tr
+                          key={j.id}
+                          className={`border-t cursor-pointer hover-elevate ${selected ? "bg-primary/5" : ""}`}
+                          onClick={() => setJobId(j.id)}
+                          data-testid={`row-recent-job-${j.id}`}
+                        >
+                          <td className="p-2 font-mono text-[11px]">{j.id.slice(0, 8)}…</td>
+                          <td className="p-2">
+                            <JobBadge status={j.status} />
+                          </td>
+                          <td className="p-2 text-muted-foreground">{fmtTime(j.startedAt)}</td>
+                          <td className="p-2 text-muted-foreground">
+                            {j.finishedAt ? fmtTime(j.finishedAt) : "—"}
+                          </td>
+                          <td className="p-2 text-right">
+                            {j.progress.instrumentsDone} / {j.progress.instrumentsTotal}
+                          </td>
+                          <td className="p-2 text-right">
+                            {j.progress.completedRequests} / {j.progress.totalRequests}
+                          </td>
+                          <td className="p-2 text-right">{j.creditsConsumed}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </CardContent>
         </Card>
       )}
