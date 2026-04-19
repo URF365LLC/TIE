@@ -7,8 +7,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
-import { Loader2, History, Sparkles, Archive, EyeOff, CheckCircle2, TrendingUp } from "lucide-react";
-import type { Settings, StrategyParameters, StrategyParamsConfig } from "@shared/schema";
+import { Loader2, History, Sparkles, Archive, EyeOff, CheckCircle2, TrendingUp, Bell } from "lucide-react";
+import type { Settings, StrategyParameters, StrategyParamsConfig, PromotionNotification } from "@shared/schema";
+
+type PromotionNotificationRow = PromotionNotification & { paramSetName: string; paramSetStatus: string };
 
 interface HistoryRow extends StrategyParameters {
   lifetimeStats: { total: number; wins: number; losses: number; missed: number; winRate: number | null };
@@ -88,6 +90,10 @@ export default function ParameterHistoryPage() {
       const res = await fetch(`/api/strategy-parameters/promotion-recommendations?${params.toString()}`);
       return res.json();
     },
+  });
+
+  const { data: notificationHistory, isLoading: isLoadingNotifications } = useQuery<PromotionNotificationRow[]>({
+    queryKey: ["/api/strategy-parameters/promotion-notifications/history"],
   });
 
   const candidateMutation = useMutation({
@@ -209,6 +215,60 @@ export default function ParameterHistoryPage() {
         </Card>
       )}
 
+      <Card data-testid="card-promotion-notification-history">
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Bell className="w-4 h-4" />
+            Auto-promotion notification history
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {isLoadingNotifications ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="w-4 h-4 animate-spin" /> Loading…</div>
+          ) : !notificationHistory?.length ? (
+            <p className="text-sm text-muted-foreground" data-testid="text-notification-history-empty">No auto-promotion recommendations have been recorded yet.</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Version</TableHead>
+                  <TableHead>Set</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Summary</TableHead>
+                  <TableHead>Email</TableHead>
+                  <TableHead>Reminders</TableHead>
+                  <TableHead>Created</TableHead>
+                  <TableHead>Dismissed</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {notificationHistory.map((n) => (
+                  <TableRow key={n.id} data-testid={`row-notification-${n.id}`}>
+                    <TableCell data-testid={`text-notification-version-${n.id}`}>v{n.paramSetVersion}</TableCell>
+                    <TableCell className="max-w-[160px] truncate" title={n.paramSetName}>{n.paramSetName}</TableCell>
+                    <TableCell><StatusBadge status={n.paramSetStatus} /></TableCell>
+                    <TableCell className="max-w-[320px] text-xs text-muted-foreground" data-testid={`text-notification-summary-${n.id}`}>{n.summary}</TableCell>
+                    <TableCell data-testid={`badge-notification-email-${n.id}`}>
+                      <EmailStatusBadge status={n.emailStatus} error={n.emailError} />
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      {n.reminderCount}
+                      {n.lastReminderAt && (
+                        <span className="text-muted-foreground"> · {new Date(n.lastReminderAt).toISOString().slice(0, 16).replace("T", " ")}</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-xs">{new Date(n.createdAt).toISOString().slice(0, 16).replace("T", " ")}</TableCell>
+                    <TableCell className="text-xs" data-testid={`text-notification-dismissed-${n.id}`}>
+                      {n.dismissedAt ? new Date(n.dismissedAt).toISOString().slice(0, 16).replace("T", " ") : <span className="text-muted-foreground">—</span>}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Self-improvement dashboard — rolling {windowDays}d win rate by version</CardTitle>
@@ -324,6 +384,12 @@ function StatusBadge({ status, isActive }: { status: string; isActive?: boolean 
   const variant: "default" | "secondary" | "outline" | "destructive" =
     status === "draft" ? "outline" : status === "active" ? "default" : "secondary";
   return <Badge variant={variant}>{status}</Badge>;
+}
+
+function EmailStatusBadge({ status, error }: { status: string; error: string | null }) {
+  const variant: "default" | "secondary" | "outline" | "destructive" =
+    status === "sent" ? "default" : status === "failed" ? "destructive" : status === "skipped" ? "outline" : "secondary";
+  return <Badge variant={variant} title={error ?? undefined}>{status}</Badge>;
 }
 
 function ConfirmAutoPromote({ recommendation, onConfirm }: { recommendation: PromotionRecommendation; onConfirm: () => void }) {

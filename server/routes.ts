@@ -631,6 +631,17 @@ export async function registerRoutes(
     }
   });
 
+  // Read-only audit log: every promotion notification ever recorded, including
+  // dismissed ones and rows whose param set was already promoted/archived.
+  app.get("/api/strategy-parameters/promotion-notifications/history", async (_req, res) => {
+    try {
+      const rows = await storage.listAllPromotionNotifications();
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
   app.post("/api/strategy-parameters/promotion-notifications/:id/dismiss", async (req, res) => {
     const id = parseInt(req.params.id);
     if (Number.isNaN(id)) return res.status(400).json({ message: "invalid id" });

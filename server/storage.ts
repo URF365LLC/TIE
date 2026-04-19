@@ -107,6 +107,7 @@ export interface IStorage {
   getPromotionNotificationByParamSetId(paramSetId: number): Promise<PromotionNotification | undefined>;
   createPromotionNotification(data: InsertPromotionNotification): Promise<PromotionNotification>;
   listActivePromotionNotifications(): Promise<Array<PromotionNotification & { paramSetName: string; paramSetStatus: string }>>;
+  listAllPromotionNotifications(): Promise<Array<PromotionNotification & { paramSetName: string; paramSetStatus: string }>>;
   dismissPromotionNotification(id: number): Promise<PromotionNotification | undefined>;
   recordPromotionNotificationReminder(id: number, data: { emailStatus: string; emailError: string | null; lastReminderAt: Date }): Promise<PromotionNotification | undefined>;
 
@@ -903,6 +904,30 @@ export class DatabaseStorage implements IStorage {
       .from(promotionNotifications)
       .innerJoin(strategyParameters, eq(strategyParameters.id, promotionNotifications.paramSetId))
       .where(and(isNull(promotionNotifications.dismissedAt), eq(strategyParameters.status, "shadow")))
+      .orderBy(desc(promotionNotifications.createdAt));
+    return rows;
+  }
+
+  async listAllPromotionNotifications(): Promise<Array<PromotionNotification & { paramSetName: string; paramSetStatus: string }>> {
+    const rows = await db
+      .select({
+        id: promotionNotifications.id,
+        paramSetId: promotionNotifications.paramSetId,
+        paramSetVersion: promotionNotifications.paramSetVersion,
+        summary: promotionNotifications.summary,
+        comparisonJson: promotionNotifications.comparisonJson,
+        emailStatus: promotionNotifications.emailStatus,
+        emailError: promotionNotifications.emailError,
+        emailedAt: promotionNotifications.emailedAt,
+        dismissedAt: promotionNotifications.dismissedAt,
+        reminderCount: promotionNotifications.reminderCount,
+        lastReminderAt: promotionNotifications.lastReminderAt,
+        createdAt: promotionNotifications.createdAt,
+        paramSetName: strategyParameters.name,
+        paramSetStatus: strategyParameters.status,
+      })
+      .from(promotionNotifications)
+      .innerJoin(strategyParameters, eq(strategyParameters.id, promotionNotifications.paramSetId))
       .orderBy(desc(promotionNotifications.createdAt));
     return rows;
   }
