@@ -548,7 +548,7 @@ export interface OutcomeResult {
 // Kept here (not in storage) because the math only makes sense with the
 // signal's entry price and stop distance.
 function metricsFrom(
-  sig: { direction: string; detectedAt: Date | string; reasonJson?: unknown },
+  sig: { direction: string; candleDatetimeUtc: Date | string; reasonJson?: unknown },
   outcome: OutcomeResult,
 ): ResolutionMetrics {
   const reason = (sig.reasonJson ?? {}) as Record<string, any>;
@@ -571,8 +571,8 @@ function metricsFrom(
   const mfeR = mfe != null && risk && risk > 0 ? mfe / risk : null;
   const maeR = mae != null && risk && risk > 0 ? mae / risk : null;
 
-  const detectedMs = new Date(sig.detectedAt).getTime();
-  const timeToResolutionMs = outcome.resolvedAtMs != null ? outcome.resolvedAtMs - detectedMs : null;
+  const entryBarMs = new Date(sig.candleDatetimeUtc).getTime();
+  const timeToResolutionMs = outcome.resolvedAtMs != null ? outcome.resolvedAtMs - entryBarMs : null;
 
   return {
     mfe: mfe != null ? round6(mfe) : null,
@@ -587,7 +587,7 @@ function round6(n: number): number { return Math.round(n * 1e6) / 1e6; }
 function round4(n: number): number { return Math.round(n * 1e4) / 1e4; }
 
 async function determineOutcomeFromCandles(
-  sig: { instrumentId: number; direction: string; detectedAt: Date | string; timeframe: string },
+  sig: { instrumentId: number; direction: string; detectedAt: Date | string; candleDatetimeUtc: Date | string; timeframe: string },
   reason: Record<string, any>,
   candleCache?: Map<string, Candle[]>
 ): Promise<OutcomeResult> {
@@ -601,10 +601,14 @@ async function determineOutcomeFromCandles(
   const tp = new Decimal(tpRaw);
   const sl = new Decimal(slRaw);
 
-  const detectedMs = new Date(sig.detectedAt).getTime();
+  // Walk candles strictly AFTER the detection bar. Using candleDatetimeUtc (the
+  // bar's own timestamp) rather than detectedAt (wall-clock creation time)
+  // avoids an off-by-one where the very next bar, closing seconds after the
+  // scanner runs, got excluded because detectedAt > nextBar.datetimeUtc.
+  const entryBarMs = new Date(sig.candleDatetimeUtc).getTime();
   const candlesAfter = await getCachedCandles(candleCache, sig.instrumentId, sig.timeframe);
   const relevant = candlesAfter
-    .filter((c) => c.datetimeUtc.getTime() > detectedMs)
+    .filter((c) => c.datetimeUtc.getTime() > entryBarMs)
     .sort((a, b) => a.datetimeUtc.getTime() - b.datetimeUtc.getTime());
 
   // Track the most favorable and most adverse prices touched along the walk.
@@ -697,13 +701,15 @@ export async function reclassifyMissedSignals(opts: { windowHours?: number } = {
 
     const tp = new Decimal(tpRaw);
     const sl = new Decimal(slRaw);
-    const detected = new Date(sig.detectedAt);
-    const from = new Date(detected.getTime());
-    const to = new Date(detected.getTime() + windowMs);
+    // Walk relative to the bar's timestamp (candleDatetimeUtc), not detectedAt
+    // wall-clock time — see determineOutcomeFromCandles for rationale.
+    const entryBar = new Date(sig.candleDatetimeUtc);
+    const from = new Date(entryBar.getTime());
+    const to = new Date(entryBar.getTime() + windowMs);
 
     const candles = await storage.getCandlesInRange(sig.instrumentId, sig.timeframe, from, to);
     const relevant = candles
-      .filter((c) => c.datetimeUtc.getTime() > detected.getTime())
+      .filter((c) => c.datetimeUtc.getTime() > entryBar.getTime())
       .sort((a, b) => a.datetimeUtc.getTime() - b.datetimeUtc.getTime());
 
     if (relevant.length === 0) {

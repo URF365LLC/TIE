@@ -5,7 +5,14 @@ import type { Signal, Instrument, Settings } from "@shared/schema";
 
 let transporter: nodemailer.Transporter | null = null;
 
-const lastAlertByInstrument = new Map<number, number>();
+// Cooldown is keyed by (instrumentId, strategy, direction) so that a fresh
+// RANGE_BREAKOUT LONG on EURUSD is not silently swallowed because a
+// TREND_CONTINUATION SHORT on the same pair fired 20 minutes earlier.
+const lastAlertByKey = new Map<string, number>();
+
+function cooldownKey(instrumentId: number, strategy: string, direction: string): string {
+  return `${instrumentId}:${strategy}:${direction}`;
+}
 
 export function safeString(value: unknown, max = 300): string {
   return String(value ?? "")
@@ -14,8 +21,14 @@ export function safeString(value: unknown, max = 300): string {
     .slice(0, max);
 }
 
-export function isWithinCooldown(instrumentId: number, cooldownMinutes: number, nowMs = Date.now()): boolean {
-  const last = lastAlertByInstrument.get(instrumentId);
+export function isWithinCooldown(
+  instrumentId: number,
+  strategy: string,
+  direction: string,
+  cooldownMinutes: number,
+  nowMs = Date.now(),
+): boolean {
+  const last = lastAlertByKey.get(cooldownKey(instrumentId, strategy, direction));
   if (last == null) return false;
   return (nowMs - last) < cooldownMinutes * 60 * 1000;
 }
@@ -84,8 +97,11 @@ export async function sendSignalAlert(
   settings: Settings
 ): Promise<void> {
   const cooldownMinutes = settings.alertCooldownMinutes ?? 60;
-  if (isWithinCooldown(instrument.id, cooldownMinutes)) {
-    log(`Alert cooldown active for ${instrument.canonicalSymbol} (${cooldownMinutes}min window), skipping`, "alerter");
+  if (isWithinCooldown(instrument.id, signal.strategy, signal.direction, cooldownMinutes)) {
+    log(
+      `Alert cooldown active for ${instrument.canonicalSymbol} ${signal.strategy} ${signal.direction} (${cooldownMinutes}min window), skipping`,
+      "alerter",
+    );
     return;
   }
 
@@ -108,7 +124,7 @@ export async function sendSignalAlert(
       text: body,
     });
 
-    lastAlertByInstrument.set(instrument.id, Date.now());
+    lastAlertByKey.set(cooldownKey(instrument.id, signal.strategy, signal.direction), Date.now());
 
     await storage.createAlertEvent({
       signalId: signal.id,
