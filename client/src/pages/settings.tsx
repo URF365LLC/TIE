@@ -7,7 +7,7 @@ import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Settings as SettingsIcon, Mail, Gauge, Save, ShieldAlert, Activity } from "lucide-react";
+import { Settings as SettingsIcon, Mail, Gauge, Save, ShieldAlert, Activity, TrendingUp } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect } from "react";
@@ -35,6 +35,9 @@ export default function SettingsPage() {
     tdCreditLimitPerMin: 377,
     tdCreditTargetPerMin: 340,
     tdMaxConcurrency: 3,
+    promotionMinSamples: 20,
+    promotionMinDeltaPp: 5,
+    promotionMaxPValue: 0.05,
   });
 
   useEffect(() => {
@@ -54,6 +57,9 @@ export default function SettingsPage() {
         tdCreditLimitPerMin: settings.tdCreditLimitPerMin ?? 377,
         tdCreditTargetPerMin: settings.tdCreditTargetPerMin ?? 340,
         tdMaxConcurrency: settings.tdMaxConcurrency ?? 3,
+        promotionMinSamples: settings.promotionMinSamples ?? 20,
+        promotionMinDeltaPp: settings.promotionMinDeltaPp ?? 5,
+        promotionMaxPValue: settings.promotionMaxPValue ?? 0.05,
       });
     }
   }, [settings]);
@@ -224,6 +230,65 @@ export default function SettingsPage() {
               />
               <p className="text-[11px] text-muted-foreground">Parallel in-flight Twelve Data requests</p>
             </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <TrendingUp className="w-4 h-4 text-muted-foreground" />
+            <div>
+              <CardTitle className="text-base font-medium">Auto-Promotion Thresholds</CardTitle>
+              <CardDescription className="text-xs">Tune when shadow parameter sets become recommended for promotion</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="space-y-2">
+              <Label className="text-sm">Minimum Sample Size</Label>
+              <Input
+                type="number"
+                min={5}
+                max={1000}
+                value={form.promotionMinSamples}
+                onChange={(e) => setForm({ ...form, promotionMinSamples: parseInt(e.target.value) || 20 })}
+                data-testid="input-promotion-min-samples"
+              />
+              <p className="text-[11px] text-muted-foreground">Minimum resolved signals (per side) before a promotion can be recommended (default 20)</p>
+            </div>
+            <div className="space-y-2">
+              <Label className="text-sm">Minimum Win-Rate Edge (pp)</Label>
+              <Input
+                type="number"
+                min={0}
+                max={50}
+                step={0.5}
+                value={form.promotionMinDeltaPp}
+                onChange={(e) => setForm({ ...form, promotionMinDeltaPp: parseFloat(e.target.value) || 0 })}
+                data-testid="input-promotion-min-delta"
+              />
+              <p className="text-[11px] text-muted-foreground">Shadow win-rate must beat active by at least this many percentage points (default 5)</p>
+            </div>
+            <div className="space-y-2">
+              <Label className="text-sm">Significance Threshold (p-value)</Label>
+              <Input
+                type="number"
+                min={0.0001}
+                max={0.5}
+                step={0.005}
+                value={form.promotionMaxPValue}
+                onChange={(e) => setForm({ ...form, promotionMaxPValue: parseFloat(e.target.value) || 0.05 })}
+                data-testid="input-promotion-max-pvalue"
+              />
+              <p className="text-[11px] text-muted-foreground">Maximum p-value for the win-rate edge to be considered significant (default 0.05)</p>
+            </div>
+          </div>
+          <div className="rounded-md bg-muted/50 p-3">
+            <p className="text-[11px] text-muted-foreground">
+              Stricter values (larger samples, higher edge, lower p-value) reduce false-positive promotions but slow adoption of better parameter sets. Looser values do the opposite.
+            </p>
           </div>
         </CardContent>
       </Card>

@@ -60,6 +60,9 @@ const settingsUpdateSchema = z.object({
   tdCreditLimitPerMin: z.number().int().min(8).max(5000).optional(),
   tdCreditTargetPerMin: z.number().int().min(8).max(5000).optional(),
   tdMaxConcurrency: z.number().int().min(1).max(16).optional(),
+  promotionMinSamples: z.number().int().min(5).max(1000).optional(),
+  promotionMinDeltaPp: z.number().min(0).max(50).optional(),
+  promotionMaxPValue: z.number().min(0.0001).max(0.5).optional(),
 }).refine(
   (data) =>
     data.tdCreditTargetPerMin == null ||
@@ -597,10 +600,14 @@ export async function registerRoutes(
   // meaningful win-rate edge over the active set in the rolling window, return
   // a structured recommendation the user can promote with one click.
   app.get("/api/strategy-parameters/promotion-recommendations", async (req, res) => {
+    const settings = await storage.getSettings();
     const days = Math.max(1, Math.min(365, parseInt(String(req.query.days ?? "30")) || 30));
-    const minSampleSize = Math.max(5, parseInt(String(req.query.minSamples ?? "20")) || 20);
-    const minDeltaPp = Math.max(0, parseFloat(String(req.query.minDeltaPp ?? "5")) || 5);
-    const maxPValue = Math.max(0.0001, Math.min(0.5, parseFloat(String(req.query.maxP ?? "0.05")) || 0.05));
+    const parsedSamples = parseInt(String(req.query.minSamples ?? settings.promotionMinSamples));
+    const minSampleSize = Math.max(5, Number.isFinite(parsedSamples) ? parsedSamples : settings.promotionMinSamples);
+    const parsedDelta = parseFloat(String(req.query.minDeltaPp ?? settings.promotionMinDeltaPp));
+    const minDeltaPp = Math.max(0, Number.isFinite(parsedDelta) ? parsedDelta : settings.promotionMinDeltaPp);
+    const parsedP = parseFloat(String(req.query.maxP ?? settings.promotionMaxPValue));
+    const maxPValue = Math.max(0.0001, Math.min(0.5, Number.isFinite(parsedP) ? parsedP : settings.promotionMaxPValue));
 
     try {
       const result = await computePromotionRecommendations({ windowDays: days, minSampleSize, minDeltaPp, maxPValue });

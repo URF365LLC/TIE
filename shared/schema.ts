@@ -181,6 +181,9 @@ export const settings = pgTable("settings", {
   tdCreditLimitPerMin: integer("td_credit_limit_per_min").notNull().default(377),
   tdCreditTargetPerMin: integer("td_credit_target_per_min").notNull().default(340),
   tdMaxConcurrency: integer("td_max_concurrency").notNull().default(3),
+  promotionMinSamples: integer("promotion_min_samples").notNull().default(20),
+  promotionMinDeltaPp: doublePrecision("promotion_min_delta_pp").notNull().default(5),
+  promotionMaxPValue: doublePrecision("promotion_max_p_value").notNull().default(0.05),
 });
 
 export interface StrategyParamsConfig {

@@ -117,7 +117,11 @@ export async function computePromotionRecommendations(opts: {
 export async function evaluatePromotionsAndNotify(settings: Settings): Promise<{ created: number; emailed: number }> {
   let result;
   try {
-    result = await computePromotionRecommendations();
+    result = await computePromotionRecommendations({
+      minSampleSize: settings.promotionMinSamples,
+      minDeltaPp: settings.promotionMinDeltaPp,
+      maxPValue: settings.promotionMaxPValue,
+    });
   } catch (err: any) {
     log(`Promotion evaluation failed: ${err.message}`, "promotion");
     return { created: 0, emailed: 0 };

@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { Loader2, History, Sparkles, Archive, EyeOff, CheckCircle2, TrendingUp } from "lucide-react";
-import type { StrategyParameters, StrategyParamsConfig } from "@shared/schema";
+import type { Settings, StrategyParameters, StrategyParamsConfig } from "@shared/schema";
 
 interface HistoryRow extends StrategyParameters {
   lifetimeStats: { total: number; wins: number; losses: number; missed: number; winRate: number | null };
@@ -71,10 +71,21 @@ export default function ParameterHistoryPage() {
       return res.json();
     },
   });
+  const { data: settings } = useQuery<Settings>({
+    queryKey: ["/api/settings"],
+  });
+  const minSamples = settings?.promotionMinSamples;
+  const minDeltaPp = settings?.promotionMinDeltaPp;
+  const maxPValue = settings?.promotionMaxPValue;
   const { data: recommendations } = useQuery<PromotionRecommendationsResponse>({
-    queryKey: ["/api/strategy-parameters/promotion-recommendations", windowDays],
+    queryKey: ["/api/strategy-parameters/promotion-recommendations", windowDays, minSamples, minDeltaPp, maxPValue],
+    enabled: settings != null,
     queryFn: async () => {
-      const res = await fetch(`/api/strategy-parameters/promotion-recommendations?days=${windowDays}`);
+      const params = new URLSearchParams({ days: String(windowDays) });
+      if (minSamples != null) params.set("minSamples", String(minSamples));
+      if (minDeltaPp != null) params.set("minDeltaPp", String(minDeltaPp));
+      if (maxPValue != null) params.set("maxP", String(maxPValue));
+      const res = await fetch(`/api/strategy-parameters/promotion-recommendations?${params.toString()}`);
       return res.json();
     },
   });
