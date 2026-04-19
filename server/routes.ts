@@ -9,6 +9,7 @@ import { analyzePortfolio, analyzeTradeDeep, batchAnalyzeTrades, generateStrateg
 import { insertStrategyParametersSchema } from "@shared/schema";
 import { summarizeSignal } from "./summary";
 import { runReplay } from "./replay";
+import { estimateBackfill, runBackfill, getBackfillJob, listBackfillJobs, type BackfillTimeframe } from "./backfill";
 
 const journalSchema = z.object({
   notes: z.string().max(5000).nullable().optional(),
@@ -682,6 +683,66 @@ export async function registerRoutes(
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }
+  });
+
+  // ─── Backfill: historical candles + indicators per active instrument ─────
+  const backfillSchema = z.object({
+    days: z.number().int().min(1).max(365),
+    timeframes: z.array(z.enum(["15m", "1h", "4h"])).min(1).optional(),
+    symbols: z.array(z.string()).optional(),
+    dryRun: z.boolean().optional(),
+  });
+
+  // Lightweight guard for admin endpoints. If ADMIN_TOKEN is set in the
+  // environment, callers must present it as `x-admin-token` (or
+  // `Authorization: Bearer <token>`). If unset, the routes remain open
+  // (matching the rest of this dev-oriented API) but a startup warning is
+  // logged so operators know to lock them down before deploying.
+  const adminToken = process.env.ADMIN_TOKEN;
+  if (!adminToken) {
+    log("ADMIN_TOKEN not set; /api/admin/backfill endpoints are unauthenticated. Set ADMIN_TOKEN in production.", "backfill");
+  }
+  const requireAdmin = (
+    req: import("express").Request,
+    res: import("express").Response,
+    next: import("express").NextFunction,
+  ) => {
+    if (!adminToken) return next();
+    const headerToken = req.header("x-admin-token");
+    const auth = req.header("authorization");
+    const bearer = auth && auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : null;
+    if (headerToken === adminToken || bearer === adminToken) return next();
+    return res.status(401).json({ message: "admin token required" });
+  };
+
+  app.post("/api/admin/backfill", requireAdmin, async (req, res) => {
+    const parsed = backfillSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid payload", errors: parsed.error.flatten() });
+    }
+    const timeframes = (parsed.data.timeframes ?? ["15m", "1h", "4h"]) as BackfillTimeframe[];
+    try {
+      if (parsed.data.dryRun) {
+        const estimate = await estimateBackfill({ days: parsed.data.days, timeframes, symbols: parsed.data.symbols });
+        return res.json({ dryRun: true, estimate });
+      }
+      const job = await runBackfill({ days: parsed.data.days, timeframes, symbols: parsed.data.symbols });
+      res.status(202).json({ jobId: job.id, status: job.status, estimate: job.estimate, progress: job.progress });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`Backfill error: ${message}`, "backfill");
+      res.status(500).json({ message });
+    }
+  });
+
+  app.get("/api/admin/backfill", requireAdmin, (_req, res) => {
+    res.json({ jobs: listBackfillJobs() });
+  });
+
+  app.get("/api/admin/backfill/:id", requireAdmin, (req, res) => {
+    const job = getBackfillJob(String(req.params.id));
+    if (!job) return res.status(404).json({ message: "job not found" });
+    res.json(job);
   });
 
   return httpServer;

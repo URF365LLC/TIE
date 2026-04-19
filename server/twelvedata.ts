@@ -213,8 +213,16 @@ export async function fetchTimeSeries(vendorSymbol: string, interval: string, ou
   return requestWithRetry("time_series", { symbol: vendorSymbol, interval, outputsize, timezone: "UTC" });
 }
 
-export async function fetchTimeSeriesRange(vendorSymbol: string, interval: string, startDate: string, endDate: string): Promise<any[]> {
-  return requestWithRetry("time_series", { symbol: vendorSymbol, interval, start_date: startDate, end_date: endDate, timezone: "UTC" });
+export async function fetchTimeSeriesRange(
+  vendorSymbol: string,
+  interval: string,
+  startDate: string,
+  endDate: string,
+  outputsize?: number,
+): Promise<any[]> {
+  const params: Record<string, string | number> = { symbol: vendorSymbol, interval, start_date: startDate, end_date: endDate, timezone: "UTC" };
+  if (outputsize !== undefined) params.outputsize = outputsize;
+  return requestWithRetry("time_series", params);
 }
 
 export async function fetchEMA(vendorSymbol: string, interval: string, timePeriod: number, outputsize = 300): Promise<any[]> {
@@ -260,6 +268,27 @@ function buildSymbolPackRequests(vendorSymbol: string, interval: string, outputs
     { endpoint: "macd", params: { symbol: vendorSymbol, interval, outputsize, timezone: "UTC" } },
     { endpoint: "atr", params: { symbol: vendorSymbol, interval, time_period: 14, outputsize, timezone: "UTC" } },
     { endpoint: "adx", params: { symbol: vendorSymbol, interval, time_period: 14, outputsize, timezone: "UTC" } },
+  ];
+}
+
+function buildSymbolPackRangeRequests(
+  vendorSymbol: string,
+  interval: string,
+  startDate: string,
+  endDate: string,
+  outputsize: number,
+) {
+  const common = { symbol: vendorSymbol, interval, start_date: startDate, end_date: endDate, outputsize, timezone: "UTC" };
+  return [
+    { endpoint: "time_series", params: { ...common } },
+    { endpoint: "ema", params: { ...common, time_period: 9 } },
+    { endpoint: "ema", params: { ...common, time_period: 21 } },
+    { endpoint: "ema", params: { ...common, time_period: 55 } },
+    { endpoint: "ema", params: { ...common, time_period: 200 } },
+    { endpoint: "bbands", params: { ...common, time_period: 20, sd: 2 } },
+    { endpoint: "macd", params: { ...common } },
+    { endpoint: "atr", params: { ...common, time_period: 14 } },
+    { endpoint: "adx", params: { ...common, time_period: 14 } },
   ];
 }
 
@@ -357,6 +386,34 @@ export async function fetchAllIndicatorsForSymbol(
   const atr = await fetchATR(vendorSymbol, interval, outputsize);
   const adx = await fetchADX(vendorSymbol, interval, outputsize);
 
+  return { candles, ema9, ema21, ema55, ema200, bbands, macd, atr, adx };
+}
+
+export async function fetchAllIndicatorsForSymbolRange(
+  vendorSymbol: string,
+  interval: string,
+  startDate: string,
+  endDate: string,
+  outputsize = 5000,
+): Promise<SymbolPackResult> {
+  const requests = buildSymbolPackRangeRequests(vendorSymbol, interval, startDate, endDate, outputsize);
+  const rows = await executeBatch(requests);
+  if (rows && rows.length >= 9) {
+    return unpackSymbolPack(rows);
+  }
+
+  // Sequential fallback
+  const candles = await fetchTimeSeriesRange(vendorSymbol, interval, startDate, endDate, outputsize);
+  const rangeReq = (endpoint: string, extra: Record<string, string | number>) =>
+    requestWithRetry(endpoint, { symbol: vendorSymbol, interval, start_date: startDate, end_date: endDate, outputsize, timezone: "UTC", ...extra });
+  const ema9 = await rangeReq("ema", { time_period: 9 });
+  const ema21 = await rangeReq("ema", { time_period: 21 });
+  const ema55 = await rangeReq("ema", { time_period: 55 });
+  const ema200 = await rangeReq("ema", { time_period: 200 });
+  const bbands = await rangeReq("bbands", { time_period: 20, sd: 2 });
+  const macd = await rangeReq("macd", {});
+  const atr = await rangeReq("atr", { time_period: 14 });
+  const adx = await rangeReq("adx", { time_period: 14 });
   return { candles, ema9, ema21, ema55, ema200, bbands, macd, atr, adx };
 }
 
