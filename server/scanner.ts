@@ -559,12 +559,16 @@ function metricsFrom(
   let mfe: number | null = null;
   let mae: number | null = null;
   if (entry != null && outcome.mfePrice != null && outcome.maePrice != null) {
+    // mfePrice / maePrice are already the favorable / adverse extremes
+    // (updateExtremes flipped which candle-side to track per direction). Here
+    // we just convert them to signed distances from entry: positive MFE when
+    // the trade moved toward target, negative MAE when it moved toward stop.
     if (sig.direction === "LONG") {
       mfe = outcome.mfePrice - entry;
       mae = outcome.maePrice - entry;
     } else {
-      mfe = entry - outcome.maePrice;
-      mae = entry - outcome.mfePrice;
+      mfe = entry - outcome.mfePrice;
+      mae = entry - outcome.maePrice;
     }
   }
 

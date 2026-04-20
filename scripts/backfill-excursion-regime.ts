@@ -106,9 +106,13 @@ async function main() {
       const entry = Number(entryRaw);
       const risk = Math.abs(entry - Number(slRaw));
 
-      const detectedMs = sig.detectedAt.getTime();
+      // Anchor the walk on the bar's own timestamp, not wall-clock detectedAt —
+      // mirrors the live scanner. Using detectedAt was an off-by-one: the bar
+      // that closes seconds after scanner execution got filtered out, leaving
+      // historical MFE/MAE/time-to-resolution understated or missing.
+      const entryBarMs = sig.candleDatetimeUtc.getTime();
       const endMs = sig.outcome === "MISSED" || !sig.resolvedAt
-        ? detectedMs + windowMs
+        ? entryBarMs + windowMs
         : sig.resolvedAt.getTime();
 
       const walkCandles = await db
@@ -118,13 +122,13 @@ async function main() {
           and(
             eq(candles.instrumentId, sig.instrumentId),
             eq(candles.timeframe, sig.timeframe),
-            gte(candles.datetimeUtc, new Date(detectedMs)),
+            gte(candles.datetimeUtc, new Date(entryBarMs)),
             lte(candles.datetimeUtc, new Date(endMs)),
           ),
         )
         .orderBy(candles.datetimeUtc);
 
-      const relevant = walkCandles.filter((c) => c.datetimeUtc.getTime() > detectedMs);
+      const relevant = walkCandles.filter((c) => c.datetimeUtc.getTime() > entryBarMs);
       if (!relevant.length) {
         skippedNoCandles++;
       } else {
@@ -152,12 +156,14 @@ async function main() {
         let mfe: number | null = null;
         let mae: number | null = null;
         if (mfePrice != null && maePrice != null) {
+          // mfePrice / maePrice above are already the favorable / adverse
+          // extremes per direction. Convert to signed distances from entry.
           if (sig.direction === "LONG") {
             mfe = mfePrice - entry;
             mae = maePrice - entry;
           } else {
-            mfe = entry - maePrice;
-            mae = entry - mfePrice;
+            mfe = entry - mfePrice;
+            mae = entry - maePrice;
           }
         }
         const mfeR = mfe != null && risk > 0 ? mfe / risk : null;
@@ -166,8 +172,8 @@ async function main() {
         if (mae != null) patch.mae = round6(mae);
         if (mfeR != null) patch.mfeR = round4(mfeR);
         if (maeR != null) patch.maeR = round4(maeR);
-        if (resolvedAtMs != null) patch.timeToResolutionMs = resolvedAtMs - detectedMs;
-        else if (sig.resolvedAt) patch.timeToResolutionMs = sig.resolvedAt.getTime() - detectedMs;
+        if (resolvedAtMs != null) patch.timeToResolutionMs = resolvedAtMs - entryBarMs;
+        else if (sig.resolvedAt) patch.timeToResolutionMs = sig.resolvedAt.getTime() - entryBarMs;
         if (mfe != null || mae != null) excursionWritten++;
       }
     } else if (entryRaw == null || tpRaw == null || slRaw == null) {
