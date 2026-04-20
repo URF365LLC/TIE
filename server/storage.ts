@@ -75,7 +75,13 @@ export interface IStorage {
   upsertSignal(data: InsertSignal): Promise<Signal>;
   updateSignalStatus(id: number, status: string): Promise<void>;
   markSignalAction(id: number, status: string): Promise<void>;
-  resolveSignal(id: number, status: string, outcome: string, outcomePrice: number | null): Promise<void>;
+  resolveSignal(
+    id: number,
+    status: string,
+    outcome: string,
+    outcomePrice: number | null,
+    metrics?: { mfe?: number | null; mae?: number | null; mfeR?: number | null; maeR?: number | null; timeToResolutionMs?: number | null },
+  ): Promise<void>;
   getMissedSignals(): Promise<Signal[]>;
   updateSignalJournal(id: number, data: { notes?: string | null; confidence?: number | null; tags?: string[] | null }): Promise<Signal | undefined>;
   updateSignalSummary(id: number, summaryText: string): Promise<void>;
@@ -391,16 +397,27 @@ export class DatabaseStorage implements IStorage {
   // (i.e. the user clicked between when the scanner read the row and when it
   // writes back), preserve that user decision. Done in SQL so we don't lose to
   // a stale in-memory read.
-  async resolveSignal(id: number, status: string, outcome: string, outcomePrice: number | null): Promise<void> {
-    await db
-      .update(signals)
-      .set({
-        status: sql`case when ${signals.status} in ('TAKEN','NOT_TAKEN') then ${signals.status} else ${status} end`,
-        outcome,
-        outcomePrice,
-        resolvedAt: new Date(),
-      })
-      .where(eq(signals.id, id));
+  async resolveSignal(
+    id: number,
+    status: string,
+    outcome: string,
+    outcomePrice: number | null,
+    metrics?: { mfe?: number | null; mae?: number | null; mfeR?: number | null; maeR?: number | null; timeToResolutionMs?: number | null },
+  ): Promise<void> {
+    const patch: Record<string, unknown> = {
+      status: sql`case when ${signals.status} in ('TAKEN','NOT_TAKEN') then ${signals.status} else ${status} end`,
+      outcome,
+      outcomePrice,
+      resolvedAt: new Date(),
+    };
+    if (metrics) {
+      if (metrics.mfe !== undefined) patch.mfe = metrics.mfe;
+      if (metrics.mae !== undefined) patch.mae = metrics.mae;
+      if (metrics.mfeR !== undefined) patch.mfeR = metrics.mfeR;
+      if (metrics.maeR !== undefined) patch.maeR = metrics.maeR;
+      if (metrics.timeToResolutionMs !== undefined) patch.timeToResolutionMs = metrics.timeToResolutionMs;
+    }
+    await db.update(signals).set(patch).where(eq(signals.id, id));
   }
 
   async getMissedSignals(): Promise<Signal[]> {

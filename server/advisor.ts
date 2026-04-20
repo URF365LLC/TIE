@@ -12,6 +12,12 @@ const openai = new OpenAI({
 const ADVISOR_MODEL = process.env.ADVISOR_MODEL || "gpt-5.1";
 const ADVISOR_FALLBACK_MODEL = process.env.ADVISOR_FALLBACK_MODEL || "gpt-4o";
 
+function round2(n: number): number { return Math.round(n * 100) / 100; }
+function avg(xs: number[]): number | null {
+  if (!xs.length) return null;
+  return round2(xs.reduce((a, x) => a + x, 0) / xs.length);
+}
+
 type ChatParamsBase = Parameters<typeof openai.chat.completions.create>[0];
 type ChatParamsNoModel = Omit<ChatParamsBase, "model" | "stream"> & { stream?: false };
 
@@ -71,6 +77,13 @@ export async function analyzePortfolio(): Promise<string> {
       pullback: r.pullback,
       macd: r.macd,
       breakout: r.breakout,
+      // Regime snapshot at detection + excursion/time metrics at resolution —
+      // these are the features that let the LLM (and the trader) distinguish
+      // "wrong thesis" from "right thesis, wrong exit" and to stratify by regime.
+      regime: s.regimeTag,
+      mfeR: s.mfeR,
+      maeR: s.maeR,
+      timeToResolutionMinutes: s.timeToResolutionMs != null ? Math.round(s.timeToResolutionMs / 60000) : null,
       ...(a ? {
         deepDiveVerified: true,
         entryQuality: a.entryQuality,
@@ -107,6 +120,41 @@ export async function analyzePortfolio(): Promise<string> {
     .map((r) => ({ hourUTC: parseInt(r.key), ...withWinRate(r) }))
     .sort((a, b) => a.hourUTC - b.hourUTC);
 
+  // In-memory aggregate over the 200 archived signals we already loaded.
+  // Intentionally NOT using getPerformanceAggregates (which is SQL-based) — keeps
+  // this change additive and avoids a schema migration dependency in the query layer.
+  const regimeBuckets: Record<string, { total: number; wins: number; losses: number; missed: number; avgMfeR: number | null; avgMaeR: number | null }> = {};
+  const regimeR: Record<string, { mfe: number[]; mae: number[] }> = {};
+  for (const s of archivedSignals) {
+    const tag = s.regimeTag ?? "UNTAGGED";
+    const b = (regimeBuckets[tag] ??= { total: 0, wins: 0, losses: 0, missed: 0, avgMfeR: null, avgMaeR: null });
+    const rr = (regimeR[tag] ??= { mfe: [], mae: [] });
+    b.total++;
+    if (s.outcome === "WIN") b.wins++;
+    else if (s.outcome === "LOSS") b.losses++;
+    else if (s.outcome === "MISSED") b.missed++;
+    if (s.mfeR != null) rr.mfe.push(s.mfeR);
+    if (s.maeR != null) rr.mae.push(s.maeR);
+  }
+  for (const [tag, b] of Object.entries(regimeBuckets)) {
+    const rr = regimeR[tag];
+    b.avgMfeR = rr.mfe.length ? round2(rr.mfe.reduce((a, x) => a + x, 0) / rr.mfe.length) : null;
+    b.avgMaeR = rr.mae.length ? round2(rr.mae.reduce((a, x) => a + x, 0) / rr.mae.length) : null;
+  }
+  const byRegime = Object.fromEntries(Object.entries(regimeBuckets).map(([k, v]) => [k, withWinRate(v)]));
+
+  // Excursion overview across WIN/LOSS only (MISSED MFE/MAE is interesting but
+  // separately reported — mixing dilutes the "was the thesis right?" signal).
+  const wins = archivedSignals.filter((s) => s.outcome === "WIN");
+  const losses = archivedSignals.filter((s) => s.outcome === "LOSS");
+  const excursionSummary = {
+    winsAvgMaeR: avg(losses.length === 0 ? [] : wins.map((s) => s.maeR).filter((n): n is number => n != null)),
+    lossesAvgMfeR: avg(losses.map((s) => s.mfeR).filter((n): n is number => n != null)),
+    lossesWithMfeGt1R: losses.filter((s) => s.mfeR != null && s.mfeR >= 1).length,
+    lossesWithMfeGt15R: losses.filter((s) => s.mfeR != null && s.mfeR >= 1.5).length,
+    totalLosses: losses.length,
+  };
+
   const signalLookup = new Map(archivedSignals.map((s) => [s.id, s]));
   const deepDiveInsights = analyzedCount > 0 ? storedAnalyses.map((a) => {
     const sig = signalLookup.get(a.signalId);
@@ -141,6 +189,14 @@ PRE-COMPUTED BREAKDOWNS:
 - By Strategy: ${JSON.stringify(byStrategy)}
 - By Session: ${JSON.stringify(bySession)}
 - By Hour (UTC): ${JSON.stringify(hourlyPerformance)}
+- By Regime: ${JSON.stringify(byRegime)}   (tags: TRENDING / CHOPPY / HIGH_VOL / MIXED — captured at signal detection from ADX + BB-width percentile)
+
+EXCURSION OVERVIEW (WIN/LOSS only, units = R-multiples of initial risk):
+- Avg MAE on winners (how deep winners dipped before paying off): ${excursionSummary.winsAvgMaeR ?? "N/A"}R
+- Avg MFE on losers (how far losers ran in our favor before reversing): ${excursionSummary.lossesAvgMfeR ?? "N/A"}R
+- Losers that reached +1.0R MFE before reversing: ${excursionSummary.lossesWithMfeGt1R}/${excursionSummary.totalLosses}
+- Losers that reached +1.5R MFE before reversing: ${excursionSummary.lossesWithMfeGt15R}/${excursionSummary.totalLosses}
+(High MFE-on-losers is a strong signal that entries are valid but exits/management are wrong — trail stops or take partials rather than re-working entry logic.)
 
 SIGNAL DATA (${archivedSignals.length} signals, ${analyzedCount} with deep-dive findings):
 ${JSON.stringify(signalSummaries, null, 1)}

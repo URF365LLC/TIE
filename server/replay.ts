@@ -3,6 +3,7 @@ import { storage } from "./storage";
 import { evaluateStrategies } from "./strategies";
 import { log } from "./logger";
 import type { Candle, Indicator, StrategyParamsConfig, Instrument } from "@shared/schema";
+import { sessionForHour, SESSION_KEYS, type SessionKey } from "@shared/sessions";
 
 /**
  * Historical replay (what-if) simulator.
@@ -51,8 +52,8 @@ export interface ReplayResult {
   durationMs: number;
   bySymbol: ReplayPerSymbol[];
   byStrategy: Record<string, { total: number; wins: number; losses: number; missed: number }>;
-  /** Wins/losses bucketed by trading session (UTC hour bands). */
-  bySession: Record<"asia" | "london" | "ny" | "off", { total: number; wins: number; losses: number; missed: number }>;
+  /** Wins/losses bucketed by trading session (UTC hour bands). Keys match shared/sessions.ts. */
+  bySession: Record<SessionKey, { total: number; wins: number; losses: number; missed: number }>;
   /** R-multiple distribution: histogram bins from -1R to +Nmax R in 0.5 increments. */
   rMultiples: { values: number[]; mean: number | null; histogram: Array<{ bin: string; count: number }> };
   /** Sample of synthetic signals (first 50) for inspection in the UI. */
@@ -65,13 +66,6 @@ export interface ReplayResult {
     outcome: "WIN" | "LOSS" | "MISSED";
     rMultiple: number | null;
   }>;
-}
-
-function sessionForHour(h: number): "asia" | "london" | "ny" | "off" {
-  if (h >= 0 && h < 8) return "asia";
-  if (h >= 8 && h < 13) return "london";
-  if (h >= 13 && h < 21) return "ny";
-  return "off";
 }
 
 const FIFTEEN_MIN_MS = 15 * 60 * 1000;
@@ -111,12 +105,9 @@ export async function runReplay(input: ReplayParams): Promise<ReplayResult> {
     durationMs: 0,
     bySymbol: [],
     byStrategy: {},
-    bySession: {
-      asia: { total: 0, wins: 0, losses: 0, missed: 0 },
-      london: { total: 0, wins: 0, losses: 0, missed: 0 },
-      ny: { total: 0, wins: 0, losses: 0, missed: 0 },
-      off: { total: 0, wins: 0, losses: 0, missed: 0 },
-    },
+    bySession: Object.fromEntries(
+      SESSION_KEYS.map((k) => [k, { total: 0, wins: 0, losses: 0, missed: 0 }]),
+    ) as ReplayResult["bySession"],
     rMultiples: { values: [], mean: null, histogram: [] },
     sampleSignals: [],
   };

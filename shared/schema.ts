@@ -130,6 +130,19 @@ export const signals = pgTable(
     notes: text("notes"),
     confidence: integer("confidence"),
     tags: text("tags").array().notNull().default(sql`'{}'::text[]`),
+    // Market regime snapshot taken at signal detection. Used to stratify
+    // performance ("strategy X wins 78% in TRENDING, 41% in CHOPPY").
+    regimeTag: varchar("regime_tag", { length: 20 }),
+    regimeContext: jsonb("regime_context"),
+    // Excursion metrics populated at resolution. mfe/mae are in price units,
+    // mfeR/maeR are in R-multiples (relative to the signal's risk = |entry - stop|).
+    // MFE answers "how far did price move in our favor before this ended?"
+    // MAE answers "how close did we come to being stopped?"
+    mfe: doublePrecision("mfe"),
+    mae: doublePrecision("mae"),
+    mfeR: doublePrecision("mfe_r"),
+    maeR: doublePrecision("mae_r"),
+    timeToResolutionMs: integer("time_to_resolution_ms"),
   },
   (table) => [
     // Unique per (instrument, tf, strategy, direction, candle, mode, paramSetId) so that the same
@@ -146,6 +159,7 @@ export const signals = pgTable(
     index("signals_status_idx").on(table.status),
     index("signals_detected_at_idx").on(table.detectedAt),
     index("signals_status_detected_idx").on(table.status, table.detectedAt),
+    index("signals_regime_tag_idx").on(table.regimeTag),
   ]
 );
 

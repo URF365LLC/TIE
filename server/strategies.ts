@@ -36,6 +36,37 @@ function indicatorForCandle(indicators: Indicator[], candle: Candle): Indicator 
   return indicators.find((i) => i.datetimeUtc.getTime() === candle.datetimeUtc.getTime());
 }
 
+const FOUR_HOUR_MS = 4 * 60 * 60 * 1000;
+
+/**
+ * Look up the HTF indicator that lies `htfBars` bars before `latest`, matched by
+ * timestamp rather than array position. The old array-index lookup (`arr[htfBars]`)
+ * silently misread across weekend/exchange gaps — e.g. on forex, "2 bars back" from
+ * Monday 00:00 UTC jumped into Friday 16:00, making the slope check garbage.
+ *
+ * Assumes `indicators` is DESC (latest first). Returns undefined when no prior bar
+ * is close enough to the target timestamp (within half an HTF bar of the expected gap).
+ */
+function htfBarBack(indicators: Indicator[], latest: Indicator, htfBars: number, htfBarMs = FOUR_HOUR_MS): Indicator | undefined {
+  const target = latest.datetimeUtc.getTime() - htfBars * htfBarMs;
+  const tolerance = htfBarMs / 2;
+  let best: Indicator | undefined;
+  let bestDelta = Infinity;
+  for (let i = 1; i < indicators.length; i++) {
+    const t = indicators[i].datetimeUtc.getTime();
+    if (t > latest.datetimeUtc.getTime()) continue; // guard: skip anything newer than latest
+    const delta = Math.abs(t - target);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      best = indicators[i];
+    }
+    // indicators are DESC so once we pass target, delta starts growing again — can stop
+    if (t < target - tolerance) break;
+  }
+  if (!best || bestDelta > tolerance) return undefined;
+  return best;
+}
+
 export function hasRequiredIndicators(ind: Indicator | undefined): boolean {
   return Boolean(
     ind &&
@@ -120,22 +151,20 @@ function evaluateTrendContinuation(
   const confAppliesHere = !conf?.appliesTo || conf.appliesTo.includes("TREND_CONTINUATION");
   if (confAppliesHere && conf?.requireHtfAlignment && input.htfCandles?.length && input.htfIndicators?.length) {
     const htfBars = Math.max(2, conf.htfEma200SlopeBars);
-    if (input.htfIndicators.length >= htfBars + 1) {
-      const htfNow = input.htfIndicators[0];
-      const htfPast = input.htfIndicators[htfBars];
-      const htfClose = input.htfCandles[0]?.close;
-      if (htfNow?.ema200 != null && htfPast?.ema200 != null && htfClose != null) {
-        const htfUp = htfNow.ema200 > htfPast.ema200 && htfClose > htfNow.ema200;
-        const htfDown = htfNow.ema200 < htfPast.ema200 && htfClose < htfNow.ema200;
-        const aligned = (direction === "LONG" && htfUp) || (direction === "SHORT" && htfDown);
-        if (!aligned) {
-          return reject(STRAT, "htf_confluence_conflict", {
-            direction,
-            htfClose,
-            htfEma200: htfNow.ema200,
-            htfSlope: htfUp ? "up" : htfDown ? "down" : "flat",
-          });
-        }
+    const htfNow = input.htfIndicators[0];
+    const htfPast = htfNow ? htfBarBack(input.htfIndicators, htfNow, htfBars) : undefined;
+    const htfClose = input.htfCandles[0]?.close;
+    if (htfNow?.ema200 != null && htfPast?.ema200 != null && htfClose != null) {
+      const htfUp = htfNow.ema200 > htfPast.ema200 && htfClose > htfNow.ema200;
+      const htfDown = htfNow.ema200 < htfPast.ema200 && htfClose < htfNow.ema200;
+      const aligned = (direction === "LONG" && htfUp) || (direction === "SHORT" && htfDown);
+      if (!aligned) {
+        return reject(STRAT, "htf_confluence_conflict", {
+          direction,
+          htfClose,
+          htfEma200: htfNow.ema200,
+          htfSlope: htfUp ? "up" : htfDown ? "down" : "flat",
+        });
       }
     }
   }
@@ -304,19 +333,17 @@ function evaluateRangeBreakout(
   const confAppliesHere = !conf?.appliesTo || conf.appliesTo.includes("RANGE_BREAKOUT");
   if (confAppliesHere && conf?.requireHtfAlignment && input.htfCandles?.length && input.htfIndicators?.length) {
     const htfBars = Math.max(2, conf.htfEma200SlopeBars);
-    if (input.htfIndicators.length >= htfBars + 1) {
-      const htfNow = input.htfIndicators[0];
-      const htfPast = input.htfIndicators[htfBars];
-      const htfClose = input.htfCandles[0]?.close;
-      if (htfNow?.ema200 != null && htfPast?.ema200 != null && htfClose != null) {
-        const htfUp = htfNow.ema200 > htfPast.ema200 && htfClose > htfNow.ema200;
-        const htfDown = htfNow.ema200 < htfPast.ema200 && htfClose < htfNow.ema200;
-        const aligned = (direction === "LONG" && htfUp) || (direction === "SHORT" && htfDown);
-        if (!aligned) {
-          return reject(STRAT, "htf_confluence_conflict", { direction, htfClose, htfEma200: htfNow.ema200 });
-        }
-        reasons.htfConfluence = `4h aligned ${direction}`;
+    const htfNow = input.htfIndicators[0];
+    const htfPast = htfNow ? htfBarBack(input.htfIndicators, htfNow, htfBars) : undefined;
+    const htfClose = input.htfCandles[0]?.close;
+    if (htfNow?.ema200 != null && htfPast?.ema200 != null && htfClose != null) {
+      const htfUp = htfNow.ema200 > htfPast.ema200 && htfClose > htfNow.ema200;
+      const htfDown = htfNow.ema200 < htfPast.ema200 && htfClose < htfNow.ema200;
+      const aligned = (direction === "LONG" && htfUp) || (direction === "SHORT" && htfDown);
+      if (!aligned) {
+        return reject(STRAT, "htf_confluence_conflict", { direction, htfClose, htfEma200: htfNow.ema200 });
       }
+      reasons.htfConfluence = `4h aligned ${direction}`;
     }
   }
   if (confAppliesHere && conf?.requireKeyLevels && input.biasCandles?.length >= 24) {
