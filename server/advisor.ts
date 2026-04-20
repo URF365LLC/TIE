@@ -148,7 +148,7 @@ export async function analyzePortfolio(): Promise<string> {
   const wins = archivedSignals.filter((s) => s.outcome === "WIN");
   const losses = archivedSignals.filter((s) => s.outcome === "LOSS");
   const excursionSummary = {
-    winsAvgMaeR: avg(losses.length === 0 ? [] : wins.map((s) => s.maeR).filter((n): n is number => n != null)),
+    winsAvgMaeR: avg(wins.map((s) => s.maeR).filter((n): n is number => n != null)),
     lossesAvgMfeR: avg(losses.map((s) => s.mfeR).filter((n): n is number => n != null)),
     lossesWithMfeGt1R: losses.filter((s) => s.mfeR != null && s.mfeR >= 1).length,
     lossesWithMfeGt15R: losses.filter((s) => s.mfeR != null && s.mfeR >= 1.5).length,
